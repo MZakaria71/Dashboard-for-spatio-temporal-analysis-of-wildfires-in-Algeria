@@ -46,7 +46,7 @@ START_YEAR = 2001
 END_YEAR = 2020  # inclusive
 PIXEL_AREA = 250 * 250 / 1e6  # km² per pixel
 
-# ----------------------- Debugging: Report File Presence -------------------------
+# ----------------------- Debug: Check Shapefile Components -------------------------
 print("DEBUG: Checking existence of shapefile components...")
 for ext in ['shp', 'shx', 'dbf', 'prj']:
     path = f"data/Dz_adm1.{ext}"
@@ -330,12 +330,13 @@ def update_map(selected_year):
         print(f"DEBUG: Stats computed for year {selected_year}.")
     
     print("DEBUG: gdf_stats shape:", gdf_stats.shape)
+    # Create a choropleth mapbox with a white background (no basemap tiles)
     fig = px.choropleth_mapbox(
         gdf_stats,
         geojson=gdf_stats.geometry,
         locations=gdf_stats.index,
         color='burned_area',
-        mapbox_style="carto-positron",
+        mapbox_style="white-bg",  # white background with no tiles
         zoom=4.5,
         center={"lat": 36, "lon": 3},
         opacity=0.8,
@@ -343,8 +344,11 @@ def update_map(selected_year):
         color_continuous_scale='YlOrRd',
         hover_data={'ADM1_EN': True, 'burned_area': ':.2f'}
     )
-    fig.update_layout(margin={"r": 0, "t": 0, "l": 0, "b": 0},
-                      title={'text': map_title, 'x': 0.5})
+    # Remove any mapbox layers to ensure no basemap is shown
+    fig.update_layout(mapbox=dict(layers=[]))
+    # Update the trace so that the fill is fully transparent and only boundaries are visible
+    fig.update_traces(marker_opacity=0, marker_line_width=2, marker_line_color="black")
+    
     return fig, f"Map displaying {map_title}."
 
 @app.callback(
