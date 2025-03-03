@@ -1,12 +1,4 @@
-{
- "cells": [
-  {
-   "cell_type": "code",
-   "execution_count": null,
-   "id": "335bf220-cc37-4318-b0ce-0b1a53c3744a",
-   "metadata": {},
-   "outputs": [],
-   "source": [
+
     "#!/usr/bin/env python\n",
     "\"\"\"\n",
     "Wildfire Analysis Dashboard\n",
