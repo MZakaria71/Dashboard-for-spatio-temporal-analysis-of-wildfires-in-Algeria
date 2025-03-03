@@ -40,9 +40,9 @@ import geopandas as gpd
 from rasterstats import zonal_stats
 
 # ----------------------- Constants and File Paths -------------------------
-PROVINCES_PATH = 'data\Dz_adm1.shp'
-LANDCOVER_TEMPLATE = 'data\LandCover_Exports\LandCover_Summer_{year}_95Percent_Confidence.tif'
-BURNDATE_TEMPLATE = 'data\BurnDate_Exports\BurnDate_Summer_{year}_95Percent_Confidence.tif'
+PROVINCES_PATH = 'data/Dz_adm1.shp'
+LANDCOVER_TEMPLATE = 'data/LandCover_Exports/LandCover_Summer_{year}_95Percent_Confidence.tif'
+BURNDATE_TEMPLATE = 'data/BurnDate_Exports/BurnDate_Summer_{year}_95Percent_Confidence.tif'
 START_YEAR = 2001
 END_YEAR = 2020  # inclusive
 PIXEL_AREA = 250 * 250 / 1e6  # km² per pixel
