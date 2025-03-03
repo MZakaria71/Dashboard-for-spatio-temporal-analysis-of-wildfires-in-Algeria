@@ -1,4 +1,3 @@
-
     "#!/usr/bin/env python\n",
     "\"\"\"\n",
     "Wildfire Analysis Dashboard\n",
