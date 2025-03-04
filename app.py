@@ -393,4 +393,59 @@ def update_charts(clickData, selected_categories):
         selected_province = provinces.iloc[int(province_index)]
         province_name = selected_province.get('ADM1_EN', f"Province {province_index}")
         title_suffix = f" ({province_name})"
-        df_lc = get
+        df_lc = get_province_landcover(selected_province.geometry)
+        df_bd = get_province_burndates(selected_province.geometry)
+        print(f"DEBUG: Using data for province: {province_name}")
+    
+    # Land Cover Bar Plot
+    if not df_lc.empty:
+        df_melted = df_lc.melt(id_vars='Year', value_vars=['Forest', 'Cropland', 'Shrubland'],
+                               var_name='Category', value_name='Burned Area')
+        df_melted = df_melted[df_melted['Category'].isin(selected_categories)]
+        fig_lc = px.bar(df_melted, x='Year', y='Burned Area', color='Category', barmode='group',
+                        labels={'Burned Area': 'Burned Area (km²)', 'Category': 'Land Cover Group'},
+                        template='plotly_white',
+                        title="Land Cover Burned Area" + title_suffix)
+        print("DEBUG: Land cover chart generated, data shape:", df_melted.shape)
+    else:
+        fig_lc = go.Figure()
+        fig_lc.update_layout(title="No land cover data available" + title_suffix)
+        print("DEBUG: Land cover DataFrame is empty.")
+    
+    # Daily Burn Pattern Bar Plot
+    if not df_bd.empty:
+        daily_counts = df_bd.groupby('day_of_year').size().reset_index(name='counts')
+        fig_bd = go.Figure()
+        fig_bd.add_trace(go.Bar(
+            x=daily_counts['day_of_year'],
+            y=daily_counts['counts'],
+            marker_color='#e74c3c',
+            name='Burn Frequency'
+        ))
+        fig_bd.update_layout(
+            title="Daily Burn Frequency" + title_suffix,
+            xaxis_title='Day of Year',
+            yaxis_title='Number of Burned Pixels (250m)',
+            hovermode='x unified',
+            template='plotly_white',
+            showlegend=False
+        )
+        print("DEBUG: Daily burn pattern chart generated, data shape:", daily_counts.shape)
+    else:
+        fig_bd = go.Figure()
+        fig_bd.update_layout(title="No burn date data available" + title_suffix)
+        print("DEBUG: Burn date DataFrame is empty.")
+    
+    return fig_lc, fig_bd
+
+# ----------------------- Main Entry Point -------------------------
+def main():
+    """
+    Main entry point for the Dash application.
+    """
+    port = int(os.environ.get("PORT", 8051))
+    print("DEBUG: Starting app on port", port)
+    app.run_server(debug=False, host='0.0.0.0', port=port)
+
+if __name__ == '__main__':
+    main()
