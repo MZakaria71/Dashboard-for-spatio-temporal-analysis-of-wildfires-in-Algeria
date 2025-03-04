@@ -343,14 +343,14 @@ def update_map(selected_year):
     geojson_data = gdf_stats.__geo_interface__
     
     # Create a choropleth mapbox with a white background (no basemap tiles)
-    fig = px.choropleth_mapbox(
+    fig = px.choropleth_map(
         gdf_stats,
         geojson=geojson_data,
         locations=gdf_stats.index,
         color='burned_area',
         mapbox_style="white-bg",
         opacity=1,
-        zoom=4.5,
+        zoom=4.5,map_style="carto-positron",
         center={"lat": 36, "lon": 3},
         color_continuous_scale='YlOrRd'
     )
