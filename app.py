@@ -52,10 +52,13 @@ for ext in ['shp', 'shx', 'dbf', 'prj']:
     path = f"data/Dz_adm1.{ext}"
     print(f"DEBUG: {path} exists? {os.path.exists(path)}")
 
-# Load administrative boundaries
+# Load administrative boundaries and reproject to WGS84 (EPSG:4326) if needed
 try:
     provinces = gpd.read_file(PROVINCES_PATH)
     print("DEBUG: Provinces DataFrame loaded with shape:", provinces.shape)
+    if provinces.crs is None or provinces.crs.to_string().lower() != "epsg:4326":
+        provinces = provinces.to_crs(epsg=4326)
+        print("DEBUG: Provinces reprojected to EPSG:4326.")
 except Exception as e:
     print("ERROR: Failed to load provinces shapefile.", e)
     raise
@@ -284,6 +287,7 @@ def update_map(selected_year):
             with rasterio.open(file_path) as src:
                 raster_crs = src.crs
                 affine = src.transform
+                # Reproject provinces to the raster CRS
                 provinces_reproj = provinces.to_crs(raster_crs)
                 burned_mask = src.read(1) > 0
             stats = zonal_stats(
@@ -328,10 +332,14 @@ def update_map(selected_year):
         gdf_stats['burned_area'] = gdf_stats['sum'].fillna(0) * (250**2) / 1e6
         map_title = f"Burned Area in {selected_year}"
         print(f"DEBUG: Stats computed for year {selected_year}.")
-
+    
     print("DEBUG: gdf_stats shape:", gdf_stats.shape)
     
-    # Convert the entire GeoDataFrame to a GeoJSON object.
+    # Ensure gdf_stats is in EPSG:4326
+    if gdf_stats.crs.to_string().lower() != "epsg:4326":
+        gdf_stats = gdf_stats.to_crs(epsg=4326)
+    
+    # Convert entire GeoDataFrame to GeoJSON
     geojson_data = gdf_stats.__geo_interface__
     
     # Create a choropleth mapbox with a white background (no basemap tiles)
@@ -341,19 +349,22 @@ def update_map(selected_year):
         locations=gdf_stats.index,
         color='burned_area',
         mapbox_style="white-bg",
-        zoom=4.5,
-        center={"lat": 36, "lon": 3},
         opacity=0.8,
-        labels={'burned_area': 'Burned Area (km²)'},
         color_continuous_scale='YlOrRd'
     )
-    # Remove any mapbox layers to ensure no basemap is shown
-    fig.update_layout(mapbox=dict(layers=[]))
-    # Update the trace so that the fill is fully transparent and only boundaries are visible
-    fig.update_traces(marker_opacity=0, marker_line_width=2, marker_line_color="black")
+    # Auto center the map based on geometry centroid
+    centroid = gdf_stats.geometry.unary_union.centroid
+    fig.update_layout(
+        mapbox=dict(
+            center={"lat": centroid.y, "lon": centroid.x},
+            zoom=5
+        ),
+        margin={"r":0,"t":0,"l":0,"b":0}
+    )
+    # Update the trace so that a slight fill (opacity 0.2) is visible and boundaries are drawn
+    fig.update_traces(marker_opacity=0.2, marker_line_width=2, marker_line_color="black")
     
     return fig, f"Map displaying {map_title}."
-
 
 @app.callback(
     [Output('landcover-time-series', 'figure'),
@@ -382,59 +393,4 @@ def update_charts(clickData, selected_categories):
         selected_province = provinces.iloc[int(province_index)]
         province_name = selected_province.get('ADM1_EN', f"Province {province_index}")
         title_suffix = f" ({province_name})"
-        df_lc = get_province_landcover(selected_province.geometry)
-        df_bd = get_province_burndates(selected_province.geometry)
-        print(f"DEBUG: Using data for province: {province_name}")
-    
-    # Land Cover Bar Plot
-    if not df_lc.empty:
-        df_melted = df_lc.melt(id_vars='Year', value_vars=['Forest', 'Cropland', 'Shrubland'],
-                               var_name='Category', value_name='Burned Area')
-        df_melted = df_melted[df_melted['Category'].isin(selected_categories)]
-        fig_lc = px.bar(df_melted, x='Year', y='Burned Area', color='Category', barmode='group',
-                        labels={'Burned Area': 'Burned Area (km²)', 'Category': 'Land Cover Group'},
-                        template='plotly_white',
-                        title="Land Cover Burned Area" + title_suffix)
-        print("DEBUG: Land cover chart generated, data shape:", df_melted.shape)
-    else:
-        fig_lc = go.Figure()
-        fig_lc.update_layout(title="No land cover data available" + title_suffix)
-        print("DEBUG: Land cover DataFrame is empty.")
-    
-    # Daily Burn Pattern Bar Plot
-    if not df_bd.empty:
-        daily_counts = df_bd.groupby('day_of_year').size().reset_index(name='counts')
-        fig_bd = go.Figure()
-        fig_bd.add_trace(go.Bar(
-            x=daily_counts['day_of_year'],
-            y=daily_counts['counts'],
-            marker_color='#e74c3c',
-            name='Burn Frequency'
-        ))
-        fig_bd.update_layout(
-            title="Daily Burn Frequency" + title_suffix,
-            xaxis_title='Day of Year',
-            yaxis_title='Number of Burned Pixels (250m)',
-            hovermode='x unified',
-            template='plotly_white',
-            showlegend=False
-        )
-        print("DEBUG: Daily burn pattern chart generated, data shape:", daily_counts.shape)
-    else:
-        fig_bd = go.Figure()
-        fig_bd.update_layout(title="No burn date data available" + title_suffix)
-        print("DEBUG: Burn date DataFrame is empty.")
-    
-    return fig_lc, fig_bd
-
-# ----------------------- Main Entry Point -------------------------
-def main():
-    """
-    Main entry point for the Dash application.
-    """
-    port = int(os.environ.get("PORT", 8051))
-    print("DEBUG: Starting app on port", port)
-    app.run_server(debug=False, host='0.0.0.0', port=port)
-
-if __name__ == '__main__':
-    main()
+        df_lc = get
