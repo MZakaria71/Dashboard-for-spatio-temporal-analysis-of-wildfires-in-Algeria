@@ -349,20 +349,17 @@ def update_map(selected_year):
         locations=gdf_stats.index,
         color='burned_area',
         mapbox_style="white-bg",
-        opacity=0.8,
+        opacity=1,
+        zoom=4.5,
+        center={"lat": 36, "lon": 3},
         color_continuous_scale='YlOrRd'
     )
     # Auto center the map based on geometry centroid
-    centroid = gdf_stats.geometry.unary_union.centroid
     fig.update_layout(
-        mapbox=dict(
-            center={"lat": centroid.y, "lon": centroid.x},
-            zoom=5
-        ),
         margin={"r":0,"t":0,"l":0,"b":0}
     )
     # Update the trace so that a slight fill (opacity 0.2) is visible and boundaries are drawn
-    fig.update_traces(marker_opacity=0.2, marker_line_width=2, marker_line_color="black")
+    fig.update_traces(marker_opacity=0.9, marker_line_width=2, marker_line_color="black")
     
     return fig, f"Map displaying {map_title}."
 
