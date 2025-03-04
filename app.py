@@ -328,21 +328,24 @@ def update_map(selected_year):
         gdf_stats['burned_area'] = gdf_stats['sum'].fillna(0) * (250**2) / 1e6
         map_title = f"Burned Area in {selected_year}"
         print(f"DEBUG: Stats computed for year {selected_year}.")
-    
+
     print("DEBUG: gdf_stats shape:", gdf_stats.shape)
+    
+    # Convert the entire GeoDataFrame to a GeoJSON object.
+    geojson_data = gdf_stats.__geo_interface__
+    
     # Create a choropleth mapbox with a white background (no basemap tiles)
     fig = px.choropleth_mapbox(
         gdf_stats,
-        geojson=gdf_stats.geometry,
+        geojson=geojson_data,
         locations=gdf_stats.index,
         color='burned_area',
-        mapbox_style="white-bg",  # white background with no tiles
+        mapbox_style="white-bg",
         zoom=4.5,
         center={"lat": 36, "lon": 3},
         opacity=0.8,
         labels={'burned_area': 'Burned Area (km²)'},
-        color_continuous_scale='YlOrRd',
-        hover_data={'ADM1_EN': True, 'burned_area': ':.2f'}
+        color_continuous_scale='YlOrRd'
     )
     # Remove any mapbox layers to ensure no basemap is shown
     fig.update_layout(mapbox=dict(layers=[]))
@@ -350,6 +353,7 @@ def update_map(selected_year):
     fig.update_traces(marker_opacity=0, marker_line_width=2, marker_line_color="black")
     
     return fig, f"Map displaying {map_title}."
+
 
 @app.callback(
     [Output('landcover-time-series', 'figure'),
