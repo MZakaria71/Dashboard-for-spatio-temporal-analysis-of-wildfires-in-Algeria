@@ -349,7 +349,7 @@ def update_map(selected_year):
         locations=gdf_stats.index,
         color='burned_area',
         mapbox_style="white-bg",
-        opacity=0.8,
+        opacity=1,
         color_continuous_scale='YlOrRd'
     )
     # Auto center the map based on geometry centroid
@@ -357,7 +357,7 @@ def update_map(selected_year):
     fig.update_layout(
         mapbox=dict(
             center={"lat": centroid.y, "lon": centroid.x},
-            zoom=5
+            zoom=4.5
         ),
         margin={"r":0,"t":0,"l":0,"b":0}
     )
