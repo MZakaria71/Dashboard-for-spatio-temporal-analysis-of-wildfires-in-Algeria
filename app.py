@@ -303,8 +303,8 @@ def create_map(provinces, selected_year):
     centroid = gdf_stats.geometry.unary_union.centroid
     fig.update_layout(
         mapbox=dict(
-            center={"lat": centroid.y, "lon": centroid.x},
-            zoom=4.5
+            center={"lat": 36.7538, "lon": 3.0588},
+            zoom=9            # adjust zoom as desired
         ),
         margin={"r":0,"t":30,"l":0,"b":0}
     )
