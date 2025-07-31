@@ -304,7 +304,7 @@ def create_map(provinces, selected_year):
     fig.update_layout(
         mapbox=dict(
           center={"lat": 36.7538, "lon": 3.0588},
-            zoom=4.5
+            zoom=4
         ),
         margin={"r":0,"t":30,"l":0,"b":0}
     )
