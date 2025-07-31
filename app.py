@@ -41,9 +41,9 @@ st.set_page_config(
 )
 
 # ----------------------- Constants and File Paths -------------------------
-PROVINCES_PATH = Path(r"C:\Users\lenovo legion\Documents\ArcGIS data\DZ\frontiere\dza_admbnda_adm1_unhcr_20200120.shp")
-LANDCOVER_TEMPLATE = r"C:\Users\Lenovo legion\Desktop\Datasets\LandCover_Exports\LandCover_Summer_{year}_95Percent_Confidence.tif"
-BURNDATE_TEMPLATE = r"C:\Users\Lenovo legion\Desktop\Datasets\LandCover_Exports\BurnDate_Summer_{year}_95Percent_Confidence.tif"
+PROVINCES_PATH = 'data/Dz_adm1.shp'
+LANDCOVER_TEMPLATE = 'data/LandCover_Exports/LandCover_Summer_{year}_95Percent_Confidence.tif'
+BURNDATE_TEMPLATE = 'data/BurnDate_Exports/BurnDate_Summer_{year}_95Percent_Confidence.tif'
 
 START_YEAR = 2001
 END_YEAR = 2020  # inclusive
