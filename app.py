@@ -352,6 +352,7 @@ def create_cumulative_curve(df_bd: pd.DataFrame, suffix: str) -> go.Figure:
 
 def main() -> None:
     st.title("🔥 Algeria Wildfire Analysis (2001–2020)")
+    st.caption("**Author:** Z.Matougui")
     st.markdown("---")
 
     # Use defaults (no data-path controls in UI)
@@ -468,3 +469,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
