@@ -628,24 +628,102 @@ def communes_resolved(ign: Optional[pd.DataFrame]) -> bool:
     return ign is not None and not ign.empty and bool((ign["ADM2_CODE"] > 0).any())
 
 
-def map_ignition_density(df: pd.DataFrame, bounds, suffix: str) -> go.Figure:
-    """Where fires start — a wilaya choropleth cannot show ignition corridors."""
+def _ignition_hover(df: pd.DataFrame) -> Tuple[Sequence, str]:
+    """Per-point tooltip text: ignition date first, then place, size, sensor.
+
+    The strings are assembled here rather than inside the hovertemplate because
+    the wording has to bend to the data — a one-overpass fire is not "0 days",
+    an unresolved commune must not print an empty line, and NRT points have to
+    admit they are provisional.
+    """
+    date = df["date"].dt.strftime("%d %b %Y")
+
+    place = df["ADM1_NAME"].astype(str)
+    has_commune = (df["ADM2_CODE"] > 0) & df["ADM2_NAME"].notna()
+    place = place.mask(has_commune, df["ADM2_NAME"].astype(str) + ", " + place)
+
+    n = df["n_detections"].astype(int)
+    days = df["duration_days"].fillna(0).round().astype(int)
+    size = n.astype(str) + " detection" + n.gt(1).map({True: "s", False: ""})
+    # duration_days is a span: 0 means the fire was seen on a single overpass.
+    size = size.mask(days > 0, size + " over " + (days + 1).astype(str) + " days")
+
+    frp = df["frp_max_mw"]
+    frp_txt = ("peak " + frp.map(lambda v: f"{v:,.0f}") + " MW FRP").where(
+        frp.notna() & (frp > 0), "FRP not reported")
+
+    sensor = df["instrument"].astype(str) + " " + df["satellite"].astype(str)
+    sensor = sensor.mask(df["source"].astype(str) == "nrt",
+                         sensor + " · NRT, provisional")
+
+    template = (
+        # Constant text belongs in the template, not in customdata: the
+        # template ships once, customdata ships per point.
+        "<b>Ignited %{customdata[0]}</b><br>"
+        "%{customdata[1]}<br>"
+        "%{customdata[2]} · %{customdata[3]}<br>"
+        "<span style='font-size:0.85em'>%{customdata[4]}</span>"
+        "<extra></extra>"
+    )
+    cd = pd.DataFrame({"date": date, "place": place, "size": size,
+                       "frp": frp_txt, "sensor": sensor})
+    return cd.to_numpy(), template
+
+
+def map_ignitions(
+    df: pd.DataFrame, bounds, suffix: str, mode: str = "points",
+) -> go.Figure:
+    """Where fires start — a wilaya choropleth cannot show ignition corridors.
+
+    Two mutually exclusive renderings, because they cannot be stacked: 22,000
+    markers drawn over the heatmap at national zoom cover it completely, and
+    the heatmap is a smoothed raster whose hover can only report a bin's
+    intensity, never a fire. Points carry the per-event detail; the heatmap
+    reads better as a pure density surface.
+    """
     if df.empty:
         return _empty_fig("No ignitions in this selection")
     center, zoom = _view_from_bounds(bounds)
-    fig = px.density_map(
-        df, lat="lat", lon="lon", radius=10,
-        center=center, zoom=zoom, map_style="carto-positron",
-        color_continuous_scale="Inferno",
-        title=f"Ignition Density{suffix}",
-    )
+
+    if mode == "heatmap":
+        fig = px.density_map(
+            df, lat="lat", lon="lon", radius=10,
+            center=center, zoom=zoom, map_style="carto-positron",
+            color_continuous_scale="Inferno",
+            title=f"Ignition Density{suffix}",
+        )
+        fig.update_layout(
+            margin=dict(r=0, t=40, l=0, b=0),
+            coloraxis_colorbar=dict(
+                title="Ignitions", len=0.7, thickness=12,
+                x=0.98, xanchor="right", y=0.5, yanchor="middle",
+                bgcolor="rgba(255,255,255,0.75)", outlinewidth=0,
+            ),
+        )
+        return fig
+
+    customdata, template = _ignition_hover(df)
+    # Marker area tracks detection count so large fires read as large, clamped
+    # so a 408-detection event cannot swallow its neighbours. Semi-transparent
+    # so that overlapping dots still pile up into a visible density.
+    n = df["n_detections"].clip(lower=1, upper=40)
+    # Everything here is serialised per point and shipped to the browser.
+    # Plotly base64-encodes numeric numpy arrays but writes plain JSON for
+    # Python lists, so keep these float32 arrays — .tolist() would roughly
+    # triple the cost of the coordinate and size channels.
+    fig = go.Figure(go.Scattermap(
+        lat=df["lat"], lon=df["lon"], mode="markers",
+        marker=dict(size=(2.5 + 1.2 * (n ** 0.5)).astype("float32"),
+                    color="#D00000", opacity=0.55),
+        customdata=customdata, hovertemplate=template,
+        name="", showlegend=False,
+        hoverlabel=dict(bgcolor="white", bordercolor="#9D0208",
+                        font=dict(color="#1B1B1F")),
+    ))
     fig.update_layout(
+        title=f"Ignitions{suffix}", showlegend=False,
         margin=dict(r=0, t=40, l=0, b=0),
-        coloraxis_colorbar=dict(
-            title="Ignitions", len=0.7, thickness=12,
-            x=0.98, xanchor="right", y=0.5, yanchor="middle",
-            bgcolor="rgba(255,255,255,0.75)", outlinewidth=0,
-        ),
+        map=dict(style="carto-positron", center=center, zoom=zoom),
     )
     return fig
 
@@ -833,8 +911,20 @@ def render_ignition_section(
 
     c1, c2 = st.columns([1.3, 1])
     with c1:
-        st.plotly_chart(map_ignition_density(df, bounds, suffix),
-                        key="ign_density_map", **STRETCH)
+        map_mode = st.radio(
+            "Map style", ["Individual ignitions", "Density heatmap"],
+            horizontal=True, key="ign_map_mode", label_visibility="collapsed",
+            help="**Individual ignitions** draws one dot per fire event at its "
+                 "first detection — hover a dot for its ignition date, place, "
+                 "size and sensor; dot size tracks detection count. "
+                 "**Density heatmap** smooths them into a continuous surface, "
+                 "which reads better at national scale but cannot be hovered.",
+        )
+        st.plotly_chart(
+            map_ignitions(df, bounds, suffix,
+                          "heatmap" if map_mode.startswith("Density") else "points"),
+            key="ign_density_map", **STRETCH,
+        )
     with c2:
         st.plotly_chart(chart_ign_annual(df, suffix, provisional),
                         key="ign_annual", **STRETCH)
