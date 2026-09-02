@@ -31,3 +31,9 @@ fire_nrt_*
 # them, and they are re-exportable from section 6 of gee_export.js.
 # The app uses the simplified data/gaul_adm1.geojson, which IS tracked.
 data/gaul_adm2.geojson
+
+# FIRMS near-real-time regional downloads (last 24h/48h/7d). Large, snapshot
+# only, and re-downloadable; prepare_ignitions.py reads them from disk.
+*_24h.csv
+*_48h.csv
+*_7d.csv

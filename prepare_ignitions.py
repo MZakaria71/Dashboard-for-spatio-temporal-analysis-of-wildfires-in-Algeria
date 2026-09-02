@@ -56,8 +56,7 @@ INPUT_DIR  = Path(__file__).parent
 OUTPUT_DIR = Path(__file__).parent / "data"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-BOUNDARY_FILE  = OUTPUT_DIR / "gaul_adm2.geojson"   # preferred: ADM1 + ADM2
-FALLBACK_ADM1  = OUTPUT_DIR / "Dz_adm1.shp"          # fallback: ADM1 only
+BOUNDARY_FILE  = OUTPUT_DIR / "gaul_adm2.geojson"   # FAO GAUL 2015 ADM1 + ADM2
 OUTPUT_FILE    = OUTPUT_DIR / "ignitions.parquet"
 
 # FIRMS downloads land as a zipped shapefile or CSV; look in both the script
@@ -378,33 +377,27 @@ def derive_ignitions(df: pd.DataFrame) -> pd.DataFrame:
 
 # ── 5. admin join ──────────────────────────────────────────────────────────
 def join_admin(ign: pd.DataFrame) -> pd.DataFrame:
-    """Point-in-polygon join to administrative units.
+    """Point-in-polygon join to FAO GAUL 2015 ADM1 + ADM2.
 
-    Prefers FAO GAUL 2015 ADM1 + ADM2, which is exactly what the burned-area
-    tables are aggregated on. Falls back to the bundled Dz_adm1.shp so the
-    pipeline still runs before the GAUL export is available — at the cost of
-    commune-level ignition filtering, and with the caveat that Dz_adm1 uses the
-    current 58-wilaya scheme while the burned-area data uses the pre-2019 48.
+    GAUL 2015 is exactly what the burned-area tables are aggregated on, so the
+    codes join directly. There is deliberately no fallback boundary file: any
+    other source uses the post-2019 58-wilaya scheme, which would place
+    ignitions in wilayas the burned-area data does not contain and silently
+    break the dashboard's wilaya filter. Better to stop and ask for the export.
     """
     import geopandas as gpd
 
-    if BOUNDARY_FILE.exists():
-        adm = gpd.read_file(BOUNDARY_FILE)
-        cols = ["ADM1_CODE", "ADM1_NAME", "ADM2_CODE", "ADM2_NAME"]
-        level = "GAUL 2015 ADM1 + ADM2"
-    elif FALLBACK_ADM1.exists():
-        adm = gpd.read_file(FALLBACK_ADM1).rename(columns={"ADM1_EN": "ADM1_NAME"})
-        cols = ["ADM1_NAME"]
-        level = "Dz_adm1.shp, ADM1 only"
-        print("  ! gaul_adm2.geojson not found — falling back to Dz_adm1.shp.")
-        print("    Commune-level ignition filtering will be unavailable.")
-        print("    Run section 6 of gee_export.js to enable the full join.")
-    else:
+    if not BOUNDARY_FILE.exists():
         sys.exit(
-            f"No boundary file. Expected {BOUNDARY_FILE} (preferred) or "
-            f"{FALLBACK_ADM1}.\nRun section 6 of gee_export.js in the Earth "
-            "Engine Code Editor to export the FAO GAUL 2015 boundaries."
+            f"Missing {BOUNDARY_FILE}.\n"
+            "Run section 6 of gee_export.js in the Earth Engine Code Editor to "
+            "export the FAO GAUL 2015 Algeria boundaries, then put "
+            "gaul_adm2.geojson in data/ and re-run this script."
         )
+
+    adm = gpd.read_file(BOUNDARY_FILE)
+    cols = ["ADM1_CODE", "ADM1_NAME", "ADM2_CODE", "ADM2_NAME"]
+    level = "GAUL 2015 ADM1 + ADM2"
 
     print(f"  joining against {level}")
     adm = adm[cols + ["geometry"]]

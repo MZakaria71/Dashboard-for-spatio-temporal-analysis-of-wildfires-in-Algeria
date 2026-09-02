@@ -293,9 +293,8 @@ print('~2019 national burned area (km²):', nationalBurn2019);
 // ─────────────────────────────────────────────────────────────────────────
 // 6.  BOUNDARY EXPORTS  —  for the ignition pipeline and the dashboard map
 //
-//     The repo currently ships Dz_adm1.shp, which uses the CURRENT 58-wilaya
-//     scheme. The burned-area tables above are aggregated on FAO GAUL 2015,
-//     which predates the 2019 reorganisation and has 48 wilayas. Exporting the
+//     The burned-area tables above are aggregated on FAO GAUL 2015, which
+//     predates the 2019 reorganisation and has 48 wilayas. Exporting the
 //     boundaries from GAUL guarantees the map and the data agree, and gives
 //     prepare_ignitions.py the polygons it needs to place ignition points.
 //
