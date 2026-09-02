@@ -31,7 +31,7 @@
  *    Cropland  : 12 (croplands) + 14 (cropland/natural veg mosaic)
  *    Other     : 11, 13, 15, 16, 17 (wetlands, urban, ice, barren, water)
  *
- *  Period : 2001–2020  |  Scale: 500 m (MODIS native)
+ *  Period : see START_YEAR/END_YEAR below  |  Scale: 500 m (MODIS native)
  *
  *  HOW TO USE:
  *    1. Paste into GEE Code Editor (code.earthengine.google.com)
@@ -46,7 +46,22 @@
 // 0.  CONFIGURATION
 // ─────────────────────────────────────────────────────────────────────────
 var START_YEAR   = 2001;
-var END_YEAR     = 2020;
+var END_YEAR     = 2026;
+
+// Two caveats when extending past 2020:
+//
+//  1. MCD64A1 burned area is available to 2026-06-01, so 2026 is a PARTIAL
+//     year (roughly January-May). Its annual total is not comparable with a
+//     full year and should be excluded from any trend fit.
+//
+//  2. MCD12Q1 land cover ends in 2023. Section 3 already falls back to the most
+//     recent available year, so 2024-2026 burned area is split by cover type
+//     using the 2023 land-cover map. Fine for a stable landscape, but it will
+//     not reflect land-use change in those years.
+//
+// The burned-area export now runs END_YEAR-START_YEAR+1 = 26 years x 12 months
+// = 312 reduceRegions calls. If a task fails with an out-of-memory or timeout
+// error, raise TILE_SCALE to 8 or 16 and re-run.
 var DRIVE_FOLDER = 'Algeria_Wildfire_Dashboard';
 var SCALE        = 500;   // metres — MODIS 500 m native resolution
 var TILE_SCALE   = 4;     // increase to 8 if a task fails with memory error
@@ -274,3 +289,39 @@ var nationalBurn2019 = burnCheck2019.gt(0)
     maxPixels : 1e10
   });
 print('~2019 national burned area (km²):', nationalBurn2019);
+
+// ─────────────────────────────────────────────────────────────────────────
+// 6.  BOUNDARY EXPORTS  —  for the ignition pipeline and the dashboard map
+//
+//     The repo currently ships Dz_adm1.shp, which uses the CURRENT 58-wilaya
+//     scheme. The burned-area tables above are aggregated on FAO GAUL 2015,
+//     which predates the 2019 reorganisation and has 48 wilayas. Exporting the
+//     boundaries from GAUL guarantees the map and the data agree, and gives
+//     prepare_ignitions.py the polygons it needs to place ignition points.
+//
+//     gaul_adm2.geojson  full resolution — point-in-polygon join, offline only
+//     gaul_adm1.geojson  simplified      — the dashboard choropleth
+// ─────────────────────────────────────────────────────────────────────────
+var wilayas = ee.FeatureCollection('FAO/GAUL/2015/level1')
+  .filter(ee.Filter.eq('ADM0_NAME', 'Algeria'))
+  .select(['ADM1_CODE', 'ADM1_NAME']);
+
+Export.table.toDrive({
+  collection     : communes,
+  description    : 'gaul_adm2_geojson',
+  folder         : DRIVE_FOLDER,
+  fileNamePrefix : 'gaul_adm2',
+  fileFormat     : 'GeoJSON'
+});
+
+// ~500 m simplification: invisible at national zoom, but roughly an order of
+// magnitude smaller to ship to the browser on every map render.
+Export.table.toDrive({
+  collection     : wilayas.map(function (f) {
+                     return f.setGeometry(f.geometry().simplify(500));
+                   }),
+  description    : 'gaul_adm1_geojson',
+  folder         : DRIVE_FOLDER,
+  fileNamePrefix : 'gaul_adm1',
+  fileFormat     : 'GeoJSON'
+});

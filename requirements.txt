@@ -1,6 +1,7 @@
-streamlit>=1.28.0
-plotly>=5.15.0
-pandas>=2.0.0
-geopandas>=0.13.0
-pyarrow>=14.0.0
-shapely>=2.0.0
+# Dashboard runtime only. The offline data-prep scripts (prepare_dataset.py,
+# prepare_ignitions.py) additionally need geopandas, shapely and scipy —
+# install those separately, they are not needed to serve the app.
+streamlit>=1.28,<2
+plotly>=5.24,<8
+pandas>=2.0,<3
+pyarrow>=14.0,<22

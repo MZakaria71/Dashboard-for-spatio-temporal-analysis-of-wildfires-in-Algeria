@@ -1,7 +1,11 @@
 # Raw / large data files (not needed by the app)
 *.tif
-burned_area_adm2_month.csv
-landcover_adm2_year.csv
+# Raw GEE exports, including browser-numbered repeat downloads like "(1)".
+# prepare_dataset.py turns these into the Parquet files the app reads.
+burned_area_adm2_month*.csv
+landcover_adm2_year*.csv
+burned_area_province_month*.csv
+landcover_province_year*.csv
 
 # Python
 __pycache__/
@@ -18,3 +22,12 @@ Thumbs.db
 # Streamlit local secrets (keep config, not secrets)
 .streamlit/secrets.toml
 
+# Raw FIRMS downloads (~100 MB) - keep the derived data/ignitions.parquet only
+data/DL_FIRE_*.zip
+fire_archive_*
+fire_nrt_*
+
+# Full-resolution commune boundaries (8 MB) - only prepare_ignitions.py needs
+# them, and they are re-exportable from section 6 of gee_export.js.
+# The app uses the simplified data/gaul_adm1.geojson, which IS tracked.
+data/gaul_adm2.geojson

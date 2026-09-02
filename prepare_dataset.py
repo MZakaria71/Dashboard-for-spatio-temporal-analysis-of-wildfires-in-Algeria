@@ -23,18 +23,68 @@ Usage:
     python prepare_dataset.py
 """
 
+import glob
 import json
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+# Windows consoles default to cp1252, which cannot encode the arrows, ellipses
+# and superscripts used in this script's progress output — printing one raises
+# UnicodeEncodeError and kills the run after the work is already done.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):                     # non-reconfigurable stream
+    pass
 
 # ── paths ──────────────────────────────────────────────────────────────────
 INPUT_DIR  = Path(__file__).parent
 OUTPUT_DIR = Path(__file__).parent / "data"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-BURNED_CSV    = INPUT_DIR / "burned_area_adm2_month.csv"
-LANDCOVER_CSV = INPUT_DIR / "landcover_adm2_year.csv"
+# Re-exporting from GEE usually leaves several generations of the same table
+# side by side — the browser appends "(1)", "(2)" … to repeat downloads, so the
+# newest export is often NOT the one with the plain name. Picking by filename
+# silently reprocesses stale data, so pick by what the file actually contains:
+# the widest year coverage wins, and every candidate is printed.
+SEARCH_DIRS = [INPUT_DIR, OUTPUT_DIR]
+
+
+def pick_csv(stem: str) -> Path:
+    """Choose the export covering the most years, reporting all candidates."""
+    paths = []
+    for d in SEARCH_DIRS:
+        paths.extend(glob.glob(str(d / f"{stem}*.csv")))
+    paths = sorted(set(paths))
+    if not paths:
+        sys.exit(f"No {stem}*.csv found in {[str(d) for d in SEARCH_DIRS]}")
+
+    scored = []
+    for p in paths:
+        try:
+            years = pd.read_csv(p, usecols=["year"])["year"]
+            scored.append((years.nunique(), int(years.min()), int(years.max()),
+                           len(years), p))
+        except Exception as exc:                      # unreadable / wrong schema
+            print(f"    skipping {Path(p).name}: {exc}")
+
+    if not scored:
+        sys.exit(f"No readable {stem}*.csv found.")
+
+    scored.sort(reverse=True)
+    print(f"  {stem}:")
+    for n_years, y0, y1, rows, p in scored:
+        mark = "->" if p == scored[0][4] else "  "
+        print(f"    {mark} {Path(p).name:<34} {y0}-{y1}  "
+              f"{n_years:>2} years  {rows:>8,} rows")
+    return Path(scored[0][4])
+
+
+print("Selecting input CSVs (widest year coverage wins):")
+BURNED_CSV    = pick_csv("burned_area_adm2_month")
+LANDCOVER_CSV = pick_csv("landcover_adm2_year")
+print()
 
 BURN_COLS = [
     "burned_forest_km2", "burned_shrubland_km2",
@@ -176,7 +226,8 @@ print("\nNational burned area by year (km²) — ADM1 aggregated:")
 print(national.to_string(index=False))
 
 monthly = b1.groupby("month")["burned_total_km2"].sum()
-print(f"\nPeak fire month: {monthly.idxmax()}  ({monthly.max():.0f} km² total 2001-2020)")
+print(f"\nPeak fire month: {monthly.idxmax()}  ({monthly.max():.0f} km² "
+      f"total {int(b1['year'].min())}-{int(b1['year'].max())})")
 
 top_wilayas = (
     b1.groupby("ADM1_NAME", observed=True)["burned_total_km2"]
