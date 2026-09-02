@@ -78,8 +78,10 @@ SEARCH_DIRS = [INPUT_DIR, OUTPUT_DIR]
 PRODUCTS = ("M-C61",)
 
 # Near-real-time rows extend coverage to today but skip the quality control
-# applied to the archive. Off by default.
-INCLUDE_NRT = False
+# applied to the archive: no `type` field, so no static-source screening, and
+# no post-hoc reprocessing. Every ignition carries a `source` column recording
+# which it came from, and the dashboard marks affected years as provisional.
+INCLUDE_NRT = True
 
 # ── tuning ─────────────────────────────────────────────────────────────────
 # Space-time clustering. Two detections belong to the same fire event if they
@@ -405,6 +407,15 @@ def derive_ignitions(df: pd.DataFrame) -> pd.DataFrame:
     ign = idx.join(events, how="left").reset_index()
     ign = ign.rename(columns={"latitude": "lat", "longitude": "lon"})
 
+    # Provenance: archive rows are quality-controlled and screened for static
+    # sources; near-real-time rows are neither. Keeping this per ignition lets
+    # the dashboard mark the affected years instead of silently blending them.
+    ign["source"] = (
+        ign["product"].astype(str)
+        .str.startswith("fire_archive_")
+        .map({True: "archive", False: "nrt"})
+    )
+
     local = ign["acq_dt"] + pd.Timedelta(hours=UTC_OFFSET_HOURS)
     ign["date"]       = local.dt.date.astype("datetime64[ns]")
     ign["year"]       = local.dt.year.astype("int16")
@@ -528,7 +539,7 @@ OUT_COLS = [
     "season", "ADM1_CODE", "ADM1_NAME", "ADM2_CODE", "ADM2_NAME",
     "instrument", "satellite", "confidence_raw", "daynight",
     "frp_mw", "frp_max_mw", "frp_sum_mw",
-    "n_detections", "duration_days", "footprint_km2",
+    "n_detections", "duration_days", "footprint_km2", "source",
 ]
 
 
@@ -577,8 +588,8 @@ def main() -> None:
     for c in ("instrument", "satellite", "daynight"):
         if c not in ign.columns:
             ign[c] = "?"
-    ign[["instrument", "satellite", "daynight"]] = ign[
-        ["instrument", "satellite", "daynight"]
+    ign[["instrument", "satellite", "daynight", "source"]] = ign[
+        ["instrument", "satellite", "daynight", "source"]
     ].astype("category")
     for c in ("frp_mw", "frp_max_mw", "frp_sum_mw", "duration_days",
               "footprint_km2", "lat", "lon"):

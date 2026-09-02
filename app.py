@@ -611,6 +611,19 @@ def filter_ignitions(
     return df.copy()
 
 
+def provisional_years(ign: Optional[pd.DataFrame]) -> List[int]:
+    """Years whose ignitions include near-real-time data.
+
+    NRT rows have no `type` field, so they are never screened for static
+    industrial sources, and they are not reprocessed the way archive rows are.
+    Mixing them into a year silently makes that year non-comparable, so the
+    affected years are marked rather than blended.
+    """
+    if ign is None or ign.empty or "source" not in ign.columns:
+        return []
+    return sorted(int(y) for y in ign.loc[ign["source"] == "nrt", "year"].unique())
+
+
 def communes_resolved(ign: Optional[pd.DataFrame]) -> bool:
     return ign is not None and not ign.empty and bool((ign["ADM2_CODE"] > 0).any())
 
@@ -637,7 +650,9 @@ def map_ignition_density(df: pd.DataFrame, bounds, suffix: str) -> go.Figure:
     return fig
 
 
-def chart_ign_annual(df: pd.DataFrame, suffix: str) -> go.Figure:
+def chart_ign_annual(
+    df: pd.DataFrame, suffix: str, provisional: Optional[List[int]] = None,
+) -> go.Figure:
     if df.empty:
         return _empty_fig("No ignitions in this selection")
     annual = df.groupby("year").size().reset_index(name="ignitions")
@@ -647,6 +662,11 @@ def chart_ign_annual(df: pd.DataFrame, suffix: str) -> go.Figure:
         labels={"year": "Year", "ignitions": "Ignitions"},
         template="plotly_white", color_discrete_sequence=["#9D0208"],
     )
+    if provisional:
+        fig.update_traces(marker_color=[
+            PARTIAL_FILL if y in provisional else "#9D0208"
+            for y in annual["year"]
+        ])
     fig.update_layout(showlegend=False, xaxis=dict(dtick=2))
     return fig
 
@@ -794,6 +814,17 @@ def render_ignition_section(
               help="Averaged over years where both burned-area and ignition "
                    "data exist.")
 
+    provisional = provisional_years(ign)
+    shown = [y for y in provisional if yr_min <= y <= yr_max]
+    if shown:
+        span = f"{shown[0]}" if len(shown) == 1 else f"{shown[0]}–{shown[-1]}"
+        st.caption(
+            f"⚠️ **{span} is provisional** — it includes near-real-time "
+            f"detections, which carry no `type` field and are therefore never "
+            f"screened for static industrial sources. Treat the count as "
+            f"indicative and exclude it from trend fits. Its bar is greyed below."
+        )
+
     if not communes_resolved(ign):
         st.caption(
             "Ignitions were matched to wilayas only — run section 6 of "
@@ -805,7 +836,7 @@ def render_ignition_section(
         st.plotly_chart(map_ignition_density(df, bounds, suffix),
                         key="ign_density_map", **STRETCH)
     with c2:
-        st.plotly_chart(chart_ign_annual(df, suffix),
+        st.plotly_chart(chart_ign_annual(df, suffix, provisional),
                         key="ign_annual", **STRETCH)
         st.plotly_chart(chart_ign_seasonality(df, suffix),
                         key="ign_seasonality", **STRETCH)
