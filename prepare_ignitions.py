@@ -186,6 +186,35 @@ def load_firms() -> pd.DataFrame:
                 frames.append(_normalise(pd.DataFrame(obj), label))
                 seen.append((label, len(obj)))
 
+    # Downloading the section-7 export and forgetting the flag would silently
+    # do nothing, so say when NRT files are present but being skipped.
+    if not INCLUDE_NRT:
+        import zipfile
+        skipped = []
+        for d in SEARCH_DIRS:
+            for f in sorted(glob.glob(str(d / "fire_nrt_*.csv"))
+                            + glob.glob(str(d / "fire_nrt_*.shp"))):
+                if any(f"_{p}_" in Path(f).stem for p in PRODUCTS):
+                    skipped.append(Path(f).name)
+            # NRT rows usually arrive as members inside the archive download.
+            for z in sorted(glob.glob(str(d / "DL_FIRE_*.zip"))):
+                try:
+                    with zipfile.ZipFile(z) as zf:
+                        for m in zf.namelist():
+                            stem = Path(m).name
+                            if (m.lower().endswith(".shp")
+                                    and stem.startswith("fire_nrt_")
+                                    and any(f"_{p}_" in stem for p in PRODUCTS)):
+                                skipped.append(f"{Path(z).name}!{stem}")
+                except zipfile.BadZipFile:
+                    continue
+        if skipped:
+            print(f"  note: {len(skipped)} near-real-time file(s) present but "
+                  f"skipped (INCLUDE_NRT is False):")
+            for name in skipped:
+                print(f"        {name}")
+            print("        set INCLUDE_NRT = True to extend the record with them")
+
     if not frames:
         sys.exit(
             f"No FIRMS files found for products {PRODUCTS} in "
@@ -215,9 +244,20 @@ def quality_filter(df: pd.DataFrame) -> pd.DataFrame:
 
     # `type` 0 = presumed vegetation fire; 1 = volcano, 2 = other static land
     # source, 3 = offshore. Only 0 is a wildfire candidate.
+    #
+    # Not every source carries the field: FIRMS near-real-time files and the
+    # MOD14A1/MYD14A1 export from gee_export.js section 7 omit it. Concatenating
+    # them with archive rows leaves those cells NaN, and a bare `== 0` test would
+    # silently discard every one of them. Keep rows that never had the field and
+    # say so, rather than dropping data the user just went and fetched.
     if "type" in df.columns:
-        df = df[df["type"] == 0]
+        kind = pd.to_numeric(df["type"], errors="coerce")
+        unscreened = int(kind.isna().sum())
+        df = df[kind.isna() | (kind == 0)]
         print(f"  type==0 (vegetation fire)      : dropped {n0 - len(df):>7,}")
+        if unscreened:
+            print(f"    {unscreened:,} rows carry no `type` field (NRT / GEE "
+                  f"sources) - kept, but not screened for static sources")
 
     n1 = len(df)
     conf = df["confidence"]

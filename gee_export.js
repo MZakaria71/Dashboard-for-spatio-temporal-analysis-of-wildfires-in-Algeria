@@ -324,3 +324,121 @@ Export.table.toDrive({
   fileNamePrefix : 'gaul_adm1',
   fileFormat     : 'GeoJSON'
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// 7.  RECENT ACTIVE FIRE  —  fills the gap after the FIRMS archive ends
+//
+//     The FIRMS archive download stops roughly three months behind real time
+//     (2026-04-30 in the current export), because that is how long the
+//     quality-controlled product takes to publish. MOD14A1 + MYD14A1 run to
+//     within a few days of today, so they close that gap.
+//
+//     Terra + Aqua is the same satellite pair behind MCD14ML, the archive
+//     product prepare_ignitions.py already reads, so extending with these two
+//     keeps the record sensor-homogeneous. Adding VIIRS instead would inject an
+//     artificial jump in detection counts (see the note in prepare_ignitions.py).
+//
+//     Output: fire_nrt_M-C61_gee_recent.csv
+//     The name is deliberate. prepare_ignitions.py already accepts files named
+//     fire_nrt_<product>_*, so this is picked up by setting INCLUDE_NRT = True
+//     with no parsing changes.
+//
+//     Known limitations, all of which the prep script tolerates:
+//       - No `type` field. That flag removes ~64% of Algerian detections as
+//         static industrial sources, and it does not exist in this product.
+//         The flare-cell test still applies once merged, because Hassi
+//         Messaoud and In Amenas are already flagged from the archive years,
+//         as does the vegetation mask. Only *new* static sources slip through.
+//       - acq_time is the satellite's nominal overpass, not the true per-pixel
+//         time. These are daily composites. Harmless here: clustering works at
+//         day resolution, and overpass time carries no information about how a
+//         fire started.
+//       - Positions are 1 km pixel centres, not detection centroids.
+// ─────────────────────────────────────────────────────────────────────────
+var RECENT_START = '2026-05-01';   // day after the FIRMS archive ends
+var RECENT_END   = '2026-09-02';   // exclusive; MOD/MYD14A1 end 2026-08-28
+
+// FireMask: 7 = low, 8 = nominal, 9 = high confidence fire. The archive run
+// drops confidence < 30, i.e. the low-confidence class, so start at 8.
+var MIN_FIRE_CLASS = 8;
+
+// Sampling region: the bounding box is far cheaper than the union of 1541
+// commune polygons, and prepare_ignitions.py clips precisely later with a
+// point-in-polygon join against GAUL.
+var recentRegion = communes.geometry().bounds();
+
+var lonLat = ee.Image.pixelLonLat();
+
+/**
+ * Fire pixels for one daily image, as a FeatureCollection of points.
+ * Emits the same column names as a FIRMS CSV so no new parsing is needed.
+ */
+function firePixels(img, satellite, nominalTime) {
+  var fire = img.select('FireMask').gte(MIN_FIRE_CLASS);
+
+  // FireMask class -> a 0-100 confidence, so the numeric confidence filter in
+  // prepare_ignitions.py behaves the same way as it does for archive rows.
+  var confidence = img.select('FireMask')
+    .remap([7, 8, 9], [20, 60, 95], 0)
+    .rename('confidence');
+
+  var frp = img.select('MaxFRP').multiply(0.1).rename('frp');   // scale 0.1 -> MW
+
+  var stack = lonLat.select(['longitude', 'latitude'])
+    .addBands(confidence)
+    .addBands(frp)
+    .updateMask(fire);
+
+  var date = ee.Date(img.get('system:time_start')).format('YYYY-MM-dd');
+
+  return stack.sample({
+    region    : recentRegion,
+    scale     : 1000,
+    projection: img.select('FireMask').projection(),
+    geometries: false,
+    tileScale : TILE_SCALE,
+    dropNulls : true
+  }).map(function (f) {
+    return f.set({
+      acq_date  : date,
+      acq_time  : nominalTime,   // nominal overpass; see note above
+      satellite : satellite,
+      instrument: 'MODIS',
+      daynight  : 'D',
+      version   : 'GEE-061'
+    });
+  });
+}
+
+function recentFires(collectionId, satellite, nominalTime) {
+  var col = ee.ImageCollection(collectionId)
+    .filterDate(RECENT_START, RECENT_END)
+    .filterBounds(recentRegion)
+    .select(['FireMask', 'MaxFRP']);
+
+  return ee.FeatureCollection(col.map(function (img) {
+    return firePixels(img, satellite, nominalTime);
+  })).flatten();
+}
+
+// Terra ~10:30 local, Aqua ~13:30 local — the same overpasses as MCD14ML.
+var recentTerra = recentFires('MODIS/061/MOD14A1', 'Terra', '1030');
+var recentAqua  = recentFires('MODIS/061/MYD14A1', 'Aqua',  '1330');
+var recentAll   = recentTerra.merge(recentAqua);
+
+print('Recent active-fire detections (' + RECENT_START + ' to ' + RECENT_END + '):',
+      recentAll.size());
+
+Map.addLayer(recentAll, {color: 'ff2d00'}, 'Recent active fire', false);
+
+Export.table.toDrive({
+  collection     : recentAll,
+  description    : 'fire_nrt_M-C61_gee_recent',
+  folder         : DRIVE_FOLDER,
+  fileNamePrefix : 'fire_nrt_M-C61_gee_recent',
+  fileFormat     : 'CSV',
+  selectors      : [
+    'latitude', 'longitude', 'acq_date', 'acq_time',
+    'confidence', 'frp', 'satellite', 'instrument', 'daynight', 'version'
+  ]
+});
