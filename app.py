@@ -29,7 +29,9 @@ st.set_page_config(
     page_title="Algeria Wildfire Analysis",
     page_icon="🔥",
     layout="wide",
-    initial_sidebar_state="expanded",
+    # "auto", not "expanded": on a phone the sidebar is a full-width
+    # drawer, so forcing it open buries the dashboard behind Controls.
+    initial_sidebar_state="auto",
 )
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -670,6 +672,36 @@ def _ignition_hover(df: pd.DataFrame) -> Tuple[Sequence, str]:
     return cd.to_numpy(), template
 
 
+def _selected_ignition(event, df: pd.DataFrame) -> Optional[str]:
+    """Detail line for a tapped point — the touch equivalent of the tooltip.
+
+    Plotly binds map hover to mousemove on the MapLibre canvas, and a
+    touchscreen never fires one, so on a phone the dots are inert. Selection
+    does fire on tap, so the same fields are rendered under the map instead.
+    """
+    try:
+        points = event["selection"]["points"]
+    except (TypeError, KeyError, IndexError):
+        return None
+    if not points:
+        return None
+
+    fields = points[-1].get("customdata")          # last tap wins
+    if not fields:
+        # Older Streamlit builds omit customdata from the event; the trace is
+        # plotted straight from df, so the point index still resolves.
+        idx = points[-1].get("point_index", points[-1].get("point_number"))
+        if idx is None or not 0 <= int(idx) < len(df):
+            return None
+        fields = _ignition_hover(df.iloc[[int(idx)]])[0][0]
+
+    fields = list(fields)
+    if len(fields) < 5:
+        return None
+    date, place, size, frp, sensor = fields[:5]
+    return f"**Ignited {date}** · {place} · {size} · {frp} · {sensor}"
+
+
 def map_ignitions(
     df: pd.DataFrame, bounds, suffix: str, mode: str = "points",
 ) -> go.Figure:
@@ -920,11 +952,23 @@ def render_ignition_section(
                  "**Density heatmap** smooths them into a continuous surface, "
                  "which reads better at national scale but cannot be hovered.",
         )
-        st.plotly_chart(
-            map_ignitions(df, bounds, suffix,
-                          "heatmap" if map_mode.startswith("Density") else "points"),
-            key="ign_density_map", **STRETCH,
-        )
+        points_mode = not map_mode.startswith("Density")
+        fig = map_ignitions(df, bounds, suffix,
+                            "points" if points_mode else "heatmap")
+        if points_mode:
+            # on_select is what makes the map work on a touchscreen: a tap
+            # cannot raise a hover tooltip, but it does select a point.
+            event = st.plotly_chart(
+                fig, key="ign_map_points", on_select="rerun",
+                selection_mode="points", **STRETCH,
+            )
+            st.caption(
+                _selected_ignition(event, df)
+                or "Tap a dot for its ignition details — with a mouse, hovering "
+                   "one shows the same thing."
+            )
+        else:
+            st.plotly_chart(fig, key="ign_map_heat", **STRETCH)
     with c2:
         st.plotly_chart(chart_ign_annual(df, suffix, provisional),
                         key="ign_annual", **STRETCH)
