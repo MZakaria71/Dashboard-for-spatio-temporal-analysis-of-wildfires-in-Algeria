@@ -956,13 +956,18 @@ def render_ignition_section(
         fig = map_ignitions(df, bounds, suffix,
                             "points" if points_mode else "heatmap")
         if points_mode:
+            # The detail line sits above the map, not below: MapLibre draws its
+            # basemap attribution outside Plotly's margin box, where on a narrow
+            # screen it overlaps whatever follows the chart. Above also keeps
+            # the map from shifting under your finger when a tap selects.
+            detail = st.empty()
             # on_select is what makes the map work on a touchscreen: a tap
             # cannot raise a hover tooltip, but it does select a point.
             event = st.plotly_chart(
                 fig, key="ign_map_points", on_select="rerun",
                 selection_mode="points", **STRETCH,
             )
-            st.caption(
+            detail.caption(
                 _selected_ignition(event, df)
                 or "Tap a dot for its ignition details — with a mouse, hovering "
                    "one shows the same thing."
@@ -1122,15 +1127,27 @@ def main() -> None:
 
     st.markdown("---")
 
-    # Tabs keep the page navigable now that ignition analysis roughly doubles
-    # the number of panels.
-    tab_burn, tab_ign = st.tabs(["🔥 Burned area", "🎯 Ignitions"])
+    # A segmented control rather than st.tabs: Streamlit builds every tab's
+    # body, hidden ones included, and a Plotly map first painted into a
+    # zero-width container falls back to Plotly's default 700 px width and
+    # never re-fits. On a phone the map was then drawn wider than its column,
+    # leaving the fires outside the visible slice. Only the chosen section is
+    # built here, which also stops shipping both sections' charts every rerun.
+    # A radio rather than st.segmented_control: AppTest cannot drive a
+    # segmented control on this Streamlit line — every run after one exists
+    # raises inside its own widget-state serialisation — which would leave the
+    # whole ignition half untestable.
+    BURN_VIEW, IGN_VIEW = "🔥 Burned area", "🎯 Ignitions"
+    view = st.radio(
+        "Section", [BURN_VIEW, IGN_VIEW], horizontal=True,
+        key="main_view", label_visibility="collapsed",
+    )
 
-    with tab_burn:
+    if view == BURN_VIEW:
         if yr_max > burn_yr_max:
             st.caption(
                 f"⚠️ Burned-area data (MODIS MCD64A1) ends in **{burn_yr_max}**. "
-                f"Years {burn_yr_max + 1}–{yr_max} appear in the Ignitions tab only."
+                f"Years {burn_yr_max + 1}–{yr_max} appear under **Ignitions** only."
             )
         if partial and yr_min <= partial[0] <= yr_max:
             st.caption(
@@ -1177,7 +1194,7 @@ def main() -> None:
             st.plotly_chart(chart_lc_composition(df_lc, categories, title_suffix),
                             key="lc_composition", **STRETCH)
 
-    with tab_ign:
+    else:
         render_ignition_section(
             load_ignitions(), df_burn, selected_wilaya, commune_code,
             yr_min, yr_max, title_suffix,
