@@ -1005,6 +1005,158 @@ def chart_burned_per_ignition(
     return fig
 
 
+# ── Fire event catalogue ──────────────────────────────────────────────────────
+# Every other panel aggregates events into counts and totals, which answers
+# "how much" and never "which fire". The August 2021 Kabylie disaster is in
+# this dataset and was unreachable through the UI until this section existed.
+EVENT_RANKS = {
+    "Detected footprint": ("footprint_km2", "%.0f km²"),
+    "Cumulative FRP":     ("frp_sum_mw",    "%,.0f MW"),
+    "Peak FRP":           ("frp_max_mw",    "%,.0f MW"),
+    "Detections":         ("n_detections",  "%d"),
+    "Duration":           ("duration_days", "%.1f days"),
+}
+
+
+def event_table(df: pd.DataFrame, rank_by: str, top_n: int) -> pd.DataFrame:
+    """The top `top_n` events by the chosen measure, ready to display."""
+    col, _ = EVENT_RANKS[rank_by]
+    top = df.nlargest(top_n, col).copy()
+    out = pd.DataFrame({
+        "Date": top["date"].dt.date,
+        "Commune": top["ADM2_NAME"].astype(str),
+        "Wilaya": top["ADM1_NAME"].astype(str),
+        # Cast before rounding: these are float32 on disk, and rounding one
+        # in place leaves values like 28.200001 in the table.
+        "Footprint (km²)": top["footprint_km2"].astype("float64").round(0),
+        "Detections": top["n_detections"],
+        "Days": top["duration_days"].astype("float64").round(1),
+        "Peak FRP (MW)": top["frp_max_mw"].astype("float64").round(0),
+        "Total FRP (MW)": top["frp_sum_mw"].astype("float64").round(0),
+        "Source": top["source"].astype(str),
+    })
+    # Keep the original rows alongside, so a selected display row can be
+    # traced back to its ignition without re-deriving anything.
+    out.attrs["rows"] = top.reset_index(drop=True)
+    return out.reset_index(drop=True)
+
+
+def map_single_event(row: pd.Series, context: pd.DataFrame) -> go.Figure:
+    """One fire in place, with that year's other ignitions around it."""
+    others = context[context["ignition_id"] != row["ignition_id"]]
+    fig = go.Figure()
+    if not others.empty:
+        fig.add_trace(go.Scattermap(
+            lat=others["lat"], lon=others["lon"], mode="markers",
+            marker=dict(size=6, color="#9AA0A6", opacity=0.55),
+            hoverinfo="skip", showlegend=False, name="",
+        ))
+    fig.add_trace(go.Scattermap(
+        lat=[row["lat"]], lon=[row["lon"]], mode="markers",
+        marker=dict(size=20, color="#D00000", opacity=0.9),
+        hovertemplate=(f"<b>{row['date']:%d %b %Y}</b><br>"
+                       f"{row['ADM2_NAME']}, {row['ADM1_NAME']}<extra></extra>"),
+        showlegend=False, name="",
+    ))
+    fig.update_layout(
+        margin=dict(r=0, t=30, l=0, b=0), showlegend=False,
+        title=f"{row['ADM2_NAME']}, {row['ADM1_NAME']} — {row['date']:%d %b %Y}",
+        map=dict(style="carto-positron",
+                 center=dict(lat=float(row["lat"]), lon=float(row["lon"])),
+                 zoom=8.5),
+    )
+    return fig
+
+
+def render_event_catalogue(
+    ign: Optional[pd.DataFrame], wilaya: str, commune_code: Optional[int],
+    yr_min: int, yr_max: int, suffix: str,
+) -> None:
+    st.subheader("📇 Fire Event Catalogue")
+
+    if ign is None or ign.empty:
+        st.info("**No ignition data yet.** This panel needs "
+                "`data/ignitions.parquet` — run `prepare_ignitions.py`.")
+        return
+
+    df = filter_ignitions(ign, wilaya, commune_code, yr_min, yr_max)
+    if df.empty:
+        st.warning("No fire events in this selection. Widen the year range or "
+                   "clear the wilaya filter.")
+        return
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        rank_by = st.radio(
+            "Rank by", list(EVENT_RANKS), horizontal=True,
+            key="event_rank", label_visibility="collapsed",
+        )
+    with c2:
+        top_n = st.selectbox("Show", [25, 50, 100, 250], index=1,
+                             key="event_top_n", label_visibility="collapsed")
+
+    table = event_table(df, rank_by, int(top_n))
+    rows = table.attrs["rows"]
+
+    st.caption(
+        f"The {len(table)} largest of **{len(df):,}** events{suffix}, by "
+        f"**{rank_by.lower()}**. Click a row to place it on the map."
+    )
+    event = st.dataframe(
+        table, key="event_table", hide_index=True,
+        on_select="rerun", selection_mode="single-row", **STRETCH,
+    )
+
+    picked = None
+    try:
+        chosen = event["selection"]["rows"]
+        if chosen:
+            picked = rows.iloc[int(chosen[0])]
+    except (TypeError, KeyError, IndexError, ValueError):
+        picked = None
+
+    if picked is None:
+        st.caption("No row selected — pick one to see where it burned.")
+    else:
+        same_year = ign[(ign["year"] == int(picked["year"]))
+                        & (ign["ADM1_NAME"] == picked["ADM1_NAME"])]
+        m1, m2 = st.columns([1.3, 1])
+        with m1:
+            st.plotly_chart(map_single_event(picked, same_year),
+                            key="event_map", **STRETCH)
+            st.caption("Grey points are the other ignitions recorded in that "
+                       "wilaya that year.")
+        with m2:
+            rank_col, _ = EVENT_RANKS[rank_by]
+            better = int((df[rank_col] > picked[rank_col]).sum()) + 1
+            e1, e2 = st.columns(2)
+            e1.metric("🔥 Detected footprint",
+                      f"{picked['footprint_km2']:,.0f} km²")
+            e2.metric("🛰️ Detections", f"{int(picked['n_detections']):,}")
+            e3, e4 = st.columns(2)
+            e3.metric("⚡ Peak FRP", f"{picked['frp_max_mw']:,.0f} MW")
+            e4.metric("⏱️ Duration", f"{picked['duration_days']:.1f} days")
+            st.caption(
+                f"Ranked **#{better:,}** of {len(df):,} events in this "
+                f"selection by {rank_by.lower()}. First detected "
+                f"{picked['date']:%d %B %Y} by {picked['instrument']} "
+                f"{picked['satellite']}."
+            )
+            if str(picked["source"]) == "nrt":
+                st.caption("⚠️ Near-real-time: never screened for static "
+                           "industrial sources, and not reprocessed.")
+
+    st.caption(
+        "**Detected footprint is a lower bound on burned area, not a "
+        "measurement of it.** It counts the ground area of pixels flagged at "
+        "an overpass, so a fire burning between overpasses, or under cloud, or "
+        "smaller than a 1 km MODIS pixel, is undercounted or missed entirely. "
+        "**Cumulative FRP sums instantaneous readings** across detections, so "
+        "it rewards fires that happened to be seen more often — compare it "
+        "against detection count rather than reading it as released energy."
+    )
+
+
 def render_ignition_section(
     ign: Optional[pd.DataFrame], df_burn: pd.DataFrame,
     wilaya: str, commune_code: Optional[int],
@@ -1267,8 +1419,9 @@ def main() -> None:
     # raises inside its own widget-state serialisation — which would leave the
     # whole ignition half untestable.
     BURN_VIEW, IGN_VIEW = "🔥 Burned area", "🎯 Ignitions"
+    EVENT_VIEW = "📇 Fire events"
     view = st.radio(
-        "Section", [BURN_VIEW, IGN_VIEW], horizontal=True,
+        "Section", [BURN_VIEW, IGN_VIEW, EVENT_VIEW], horizontal=True,
         key="main_view", label_visibility="collapsed",
     )
 
@@ -1364,9 +1517,15 @@ def main() -> None:
             st.plotly_chart(chart_lc_composition(df_lc, categories, title_suffix),
                             key="lc_composition", **STRETCH)
 
-    else:
+    elif view == IGN_VIEW:
         render_ignition_section(
             load_ignitions(), df_burn, selected_wilaya, commune_code,
+            yr_min, yr_max, title_suffix,
+        )
+
+    else:
+        render_event_catalogue(
+            load_ignitions(), selected_wilaya, commune_code,
             yr_min, yr_max, title_suffix,
         )
 
