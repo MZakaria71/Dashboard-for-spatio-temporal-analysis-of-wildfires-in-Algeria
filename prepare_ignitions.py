@@ -134,9 +134,34 @@ UTC_OFFSET_HOURS = 1
 
 
 # ── 1. load ────────────────────────────────────────────────────────────────
+# FIRMS serves two naming conventions. The "Download" page (an archive
+# request) yields fire_<archive|nrt>_<PRODUCT>_<id>; the "Active Fire Data"
+# page (a ready-made regional extract, 24h/48h/7d) yields
+# <SENSOR>_<region>_<window>.csv with no product code. Both are the same
+# point product, so map the sensor prefixes onto FIRMS product codes rather
+# than teaching the rest of the pipeline about a second convention.
+FIRMS_REGIONAL_PREFIXES = {
+    "MODIS_C6_1_":     "M-C61",
+    "SUOMI_VIIRS_C2_": "SV-C2",
+    "J1_VIIRS_C2_":    "J1V-C2",
+    "J2_VIIRS_C2_":    "J2V-C2",
+}
+
+
+def _regional_product(stem: str) -> str | None:
+    for prefix, product in FIRMS_REGIONAL_PREFIXES.items():
+        if stem.startswith(prefix):
+            return product
+    return None
+
+
 def _wanted(member: str) -> bool:
     """Does this file belong to a product we asked for?"""
     stem = Path(member).name
+    regional = _regional_product(stem)
+    if regional is not None:
+        # A regional extract is always near-real-time.
+        return INCLUDE_NRT and regional in PRODUCTS
     if not stem.startswith(("fire_archive_", "fire_nrt_")):
         return False
     if stem.startswith("fire_nrt_") and not INCLUDE_NRT:
@@ -154,12 +179,20 @@ def _normalise(df: pd.DataFrame, label: str) -> pd.DataFrame:
                                 "bright_ti5": "bright_t31"})
     if "instrument" not in df.columns:
         df["instrument"] = "VIIRS" if "bright_ti4" in df.columns else "MODIS"
+    # Regional extracts abbreviate the satellite; the archive spells it out.
+    if "satellite" in df.columns:
+        df["satellite"] = df["satellite"].replace({"T": "Terra", "A": "Aqua",
+                                                   "N": "Suomi NPP"})
     df["product"] = label
     return df
 
 
 def _product_of(label: str) -> str:
-    """FIRMS names files fire_<archive|nrt>_<PRODUCT>_<id>."""
+    """FIRMS names files fire_<archive|nrt>_<PRODUCT>_<id>, or, for a regional
+    extract, <SENSOR>_<region>_<window>."""
+    regional = _regional_product(label)
+    if regional is not None:
+        return regional
     parts = label.split("_")
     return parts[2] if len(parts) > 2 else label
 
@@ -230,7 +263,11 @@ def load_firms() -> pd.DataFrame:
 
         # b) loose shapefiles / CSVs
         for pat, reader in (("fire_*.shp", gpd.read_file),
-                            ("fire_*.csv", pd.read_csv)):
+                            ("fire_*.csv", pd.read_csv),
+                            ("MODIS_*.csv", pd.read_csv),
+                            ("SUOMI_VIIRS_*.csv", pd.read_csv),
+                            ("J1_VIIRS_*.csv", pd.read_csv),
+                            ("J2_VIIRS_*.csv", pd.read_csv)):
             for f in sorted(glob.glob(str(d / pat))):
                 if not _wanted(f):
                     continue
@@ -280,17 +317,59 @@ def load_firms() -> pd.DataFrame:
     for label, n in seen:
         print(f"  read {label:45s} {n:>9,} detections")
 
-    if len({lbl.split('_')[2] for lbl, _ in seen}) > 1:
+    frames, seen = _drop_redundant_derived(frames, seen)
+
+    # Judge homogeneity on what survived, not on what was read — and via
+    # _product_of, since a regional extract carries no product code in its name.
+    if len({_product_of(lbl) for lbl, _ in seen}) > 1:
         print("\n  !! WARNING: more than one satellite product loaded.\n"
               "     Detection capability jumps each time a new satellite comes\n"
               "     online, which creates an artificial upward trend in\n"
               "     ignition counts. Use a single product for trend analysis.\n")
 
-    frames, seen = _drop_redundant_derived(frames, seen)
-
     out = pd.concat([df for _, df in frames], ignore_index=True)
+
+    # Overlapping downloads are normal — a 7-day extract fetched twice, or an
+    # archive request that now reaches into a period a regional file already
+    # covered. A detection is identified by satellite, timestamp and position,
+    # so drop repeats rather than letting them inflate event sizes.
+    before = len(out)
+    out = out.loc[~out.assign(_la=out["latitude"].round(4),
+                              _lo=out["longitude"].round(4))
+                     .duplicated(subset=["satellite", "acq_date", "acq_time",
+                                         "_la", "_lo"], keep="first")]
+    if before != len(out):
+        print(f"  de-duplicated {before - len(out):,} repeated detections "
+              f"across overlapping downloads")
+
     print(f"  total {'':45s} {len(out):>9,} detections")
+    _report_coverage(out)
     return out
+
+
+def _report_coverage(df: pd.DataFrame, tail_days: int = 45) -> None:
+    """Say how current the record is, and name any missing days at the end.
+
+    A hole in the tail is easy to create — the archive request and a regional
+    extract rarely meet exactly — and it silently backdates nothing but
+    postdates every fire that ignited inside it, so it is worth printing.
+    """
+    days = pd.to_datetime(df["acq_date"]).dt.normalize()
+    last = days.max()
+    print(f"  coverage {'':44s} {days.min().date()} -> {last.date()}")
+
+    window = pd.date_range(last - pd.Timedelta(days=tail_days), last, freq="D")
+    present = set(days.unique())
+    missing = [d for d in window if d not in present]
+    if missing:
+        shown = ", ".join(d.strftime("%Y-%m-%d") for d in missing[:8])
+        more = f" (+{len(missing) - 8} more)" if len(missing) > 8 else ""
+        print(f"  !! {len(missing)} day(s) with no detections in the last "
+              f"{tail_days}: {shown}{more}")
+        print( "     A gap is not necessarily an outage — a quiet winter day")
+        print( "     genuinely has none — but in fire season it usually means")
+        print( "     the downloads do not meet. Fires igniting in a gap are")
+        print( "     dated to their first detection after it.")
 
 
 # ── 2. quality filter ──────────────────────────────────────────────────────
