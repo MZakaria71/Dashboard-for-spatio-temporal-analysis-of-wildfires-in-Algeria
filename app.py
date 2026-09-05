@@ -10,7 +10,7 @@ Dashboard startup: < 1 second (previously: minutes).
 Data source: MODIS MCD64A1 (burned area) + MCD12Q1 (land cover) via Google Earth Engine
 Spatial resolution: ADM1 (wilaya) and ADM2 (commune) level
 
-Author: Z.Matougui
+Author: Zakaria Matougui, researcher at Territory Research Centre (CRAT)
 """
 from __future__ import annotations
 
@@ -497,11 +497,92 @@ def _outline_coords(geom: dict) -> Tuple[List[Optional[float]], List[Optional[fl
     return lons, lats
 
 
+# A wilaya holding only a few km² of the selected cover types yields a
+# meaningless rate — one fire divided by almost nothing puts it at the top of
+# the map. Below this it is shown as no data instead.
+MIN_BURNABLE_KM2 = 50.0
+
+MAP_METRICS = {
+    "Share of burnable land": "rate",
+    "Total burned area": "total",
+    "Years with fire": "recurrence",
+}
+
+METRIC_META = {
+    "total": dict(
+        bar="km²", fmt=":,.1f", title="Burned Area by Wilaya",
+        label="Burned area (km²)",
+    ),
+    "rate": dict(
+        bar="%/yr", fmt=":.2f", title="Annual Burn Rate by Wilaya",
+        label="% of burnable land per year",
+    ),
+    "recurrence": dict(
+        bar="years", fmt=":.0f", title="Years with Fire by Wilaya",
+        label="Years with any fire",
+    ),
+}
+
+
+@st.cache_data(show_spinner=False)
+def wilaya_metric(
+    yr_min: int, yr_max: int, categories: Tuple[str, ...], metric: str,
+) -> pd.DataFrame:
+    """One value per wilaya for the chosen map metric.
+
+    `total` ranks wilayas largely by their size — Tlemcen and Sidi Bel Abbes
+    sit in its top ten at ~12% of their burnable land, while Blida is tenth on
+    area and first once normalised. `rate` divides by the land that could
+    actually burn, so it measures fire regime rather than geography.
+    """
+    burn_cols = selected_burn_cols(categories)
+    if not burn_cols:
+        return pd.DataFrame(columns=["ADM1_NAME", "value"])
+
+    b1, _, lc1, _, _ = load_data()
+    window = b1[(b1["year"] >= yr_min) & (b1["year"] <= yr_max)].copy()
+    window["_sel"] = window[burn_cols].sum(axis=1)
+
+    if metric == "recurrence":
+        yearly = window.groupby(["ADM1_NAME", "year"], observed=True)["_sel"].sum()
+        val = (yearly > 0).groupby("ADM1_NAME", observed=True).sum()
+        return val.rename("value").reset_index()
+
+    if metric == "rate":
+        # A partial final year would add its fires to the numerator while
+        # counting as a whole year in the denominator, deflating every rate.
+        # Drop it from both rather than quietly averaging it in.
+        partial = partial_final_year()
+        if partial and yr_min <= partial[0] <= yr_max:
+            window = window[window["year"] != partial[0]]
+        n_years = int(window["year"].nunique())
+        if not n_years:
+            return pd.DataFrame(columns=["ADM1_NAME", "value"])
+
+        lc_cols = [c for c in LC_TYPE_COLS if LC_LABELS[c] in categories]
+        lcw = lc1[(lc1["year"] >= yr_min) & (lc1["year"] <= yr_max)]
+        if lcw.empty or not lc_cols:
+            return pd.DataFrame(columns=["ADM1_NAME", "value"])
+
+        burned = window.groupby("ADM1_NAME", observed=True)["_sel"].sum()
+        burnable = (lcw.assign(_b=lcw[lc_cols].sum(axis=1))
+                       .groupby("ADM1_NAME", observed=True)["_b"].mean())
+        out = pd.concat([burned.rename("burned"),
+                         burnable.rename("burnable")], axis=1).dropna()
+        out = out[out["burnable"] >= MIN_BURNABLE_KM2]
+        out["value"] = 100.0 * out["burned"] / (out["burnable"] * n_years)
+        return out.reset_index()[["ADM1_NAME", "value"]]
+
+    total = window.groupby("ADM1_NAME", observed=True)["_sel"].sum()
+    return total.rename("value").reset_index()
+
+
 @st.cache_data(show_spinner=False)
 def build_choropleth(
     yr_min: int, yr_max: int, wilaya: str, categories: Tuple[str, ...],
+    metric: str = "rate",
 ) -> go.Figure:
-    """Choropleth of burned area per wilaya for the current selection.
+    """Choropleth of the chosen metric per wilaya for the current selection.
 
     Cached on its scalar arguments: the geometry is re-serialised only when the
     selection actually changes, not on every widget interaction.
@@ -512,27 +593,28 @@ def build_choropleth(
 
     b1, _, _, _, _ = load_data()
     prov = load_provinces()
+    meta = METRIC_META[metric]
 
-    window = b1[(b1["year"] >= yr_min) & (b1["year"] <= yr_max)]
-    totals = (
-        window.assign(**{SEL_COL: window[cols].sum(axis=1)})
-        .groupby("ADM1_NAME", observed=True)[SEL_COL].sum()
-        .reset_index()
-    )
-    totals["ADM1_NAME"] = totals["ADM1_NAME"].astype(str)
+    totals = wilaya_metric(yr_min, yr_max, categories, metric)
+    if not totals.empty:
+        totals["ADM1_NAME"] = totals["ADM1_NAME"].astype(str)
 
     frame = pd.DataFrame({"ADM1_NAME": prov["names"]}).merge(
         totals, on="ADM1_NAME", how="left"
-    )
-    known = frame[frame[SEL_COL].notna()]
-    unknown = frame[frame[SEL_COL].isna()]
+    ) if not totals.empty else pd.DataFrame(
+        {"ADM1_NAME": prov["names"], "value": float("nan")})
+    known = frame[frame["value"].notna()]
+    unknown = frame[frame["value"].isna()]
 
     # Nothing to colour: the selected years lie outside the burned-area record.
     # An all-grey map with no explanation looks like a rendering failure.
     if known.empty:
+        extra = ("<br><sub>Rates exclude the incomplete final year</sub>"
+                 if metric == "rate" else "")
         return _empty_fig(
             f"No burned-area data for {yr_min}–{yr_max}<br>"
-            f"<sub>MCD64A1 covers {int(b1['year'].min())}–{int(b1['year'].max())}</sub>"
+            f"<sub>MCD64A1 covers {int(b1['year'].min())}–{int(b1['year'].max())}"
+            f"</sub>{extra}"
         )
 
     fig = px.choropleth_map(
@@ -540,14 +622,14 @@ def build_choropleth(
         geojson=prov["geojson"],
         locations="ADM1_NAME",
         featureidkey="properties.ADM1_NAME",
-        color=SEL_COL,
+        color="value",
         hover_name="ADM1_NAME",
-        hover_data={SEL_COL: ":.1f"},
+        hover_data={"value": meta["fmt"]},
         map_style="carto-positron",
         opacity=0.75,
         color_continuous_scale="YlOrRd",
-        labels={SEL_COL: "Burned (km²)"},
-        title=f"Burned Area by Wilaya ({yr_min}–{yr_max})",
+        labels={"value": meta["label"]},
+        title=f"{meta['title']} ({yr_min}–{yr_max})",
     )
 
     # Boundaries and data now come from the same GAUL 2015 release, so this is
@@ -583,12 +665,57 @@ def build_choropleth(
         # Overlay the colourbar on the map. With a zero right margin there is no
         # gutter for it to sit in, so anchoring it outside gets it clipped.
         coloraxis_colorbar=dict(
-            title="km²", len=0.7, thickness=12,
+            title=meta["bar"], len=0.7, thickness=12,
             x=0.98, xanchor="right", y=0.5, yanchor="middle",
             bgcolor="rgba(255,255,255,0.75)", outlinewidth=0,
         ),
         showlegend=False,
     )
+    return fig
+
+
+@st.cache_data(show_spinner=False)
+def chart_recurrence(
+    yr_min: int, yr_max: int, categories: Tuple[str, ...],
+    wilaya: str, suffix: str, top_n: int = 15,
+) -> go.Figure:
+    """Communes that burn most often — a fuel-management list, not a total.
+
+    Cumulative area answers "where was the most lost". How often a place burns
+    is a different question, and the one that identifies somewhere the fire
+    regime keeps returning to. Across all cover types Ain Zitoun burned in 22
+    of the record's 26 years; restricted to forest, shrubland and cropland the
+    list is led by Messelmoun and Ouled Hellal at 20.
+    """
+    cols = selected_burn_cols(categories)
+    if not cols:
+        return _empty_fig("Select at least one land-cover type")
+
+    _, b2, _, _, _ = load_data()
+    window = b2[(b2["year"] >= yr_min) & (b2["year"] <= yr_max)].copy()
+    if wilaya != ALL_WILAYAS:
+        window = window[window["ADM1_NAME"] == wilaya]
+    if window.empty:
+        return _empty_fig("No burned-area data in this selection")
+
+    window["_sel"] = window[cols].sum(axis=1)
+    yearly = window.groupby(
+        ["ADM1_NAME", "ADM2_NAME", "year"], observed=True)["_sel"].sum()
+    years = (yearly > 0).groupby(
+        ["ADM1_NAME", "ADM2_NAME"], observed=True).sum().rename("years")
+    top = years[years > 0].sort_values(ascending=False).head(top_n).reset_index()
+    if top.empty:
+        return _empty_fig("No commune burned in this selection")
+
+    top["label"] = top["ADM2_NAME"].astype(str) + ", " + top["ADM1_NAME"].astype(str)
+    span = yr_max - yr_min + 1
+    fig = px.bar(
+        top.iloc[::-1], x="years", y="label", orientation="h",
+        title=f"Most Frequently Burning Communes{suffix}",
+        labels={"years": f"Years with fire (of {span})", "label": ""},
+        template="plotly_white", color_discrete_sequence=["#9D0208"],
+    )
+    fig.update_layout(showlegend=False, margin=dict(l=0, r=10, t=40, b=0))
     return fig
 
 
@@ -1029,8 +1156,9 @@ def main() -> None:
 
     st.title(f"🔥 Algeria Wildfire Analysis ({data_yr_min}–{data_yr_max})")
     st.caption(
-        "**Author:** Z.Matougui · "
-        "**Data:** MODIS MCD64A1 (burned area) + MCD12Q1 (land cover) via Google Earth Engine"
+        "**Author:** Zakaria Matougui, researcher at Territory Research "
+        "Centre (CRAT) · "
+        "**Data:** MODIS MCD64A1 (burned area) + MCD12Q1 (land cover)"
     )
     st.markdown("---")
 
@@ -1161,11 +1289,38 @@ def main() -> None:
         col_map, col_bar = st.columns([1.3, 1])
 
         with col_map:
-            st.subheader("🗺️ Wilaya Burned Area Map")
+            st.subheader("🗺️ Wilaya Fire Map")
+            metric_label = st.radio(
+                "Map metric", list(MAP_METRICS), horizontal=True,
+                key="burn_metric", label_visibility="collapsed",
+                help="**Share of burnable land** divides by the forest, "
+                     "shrubland and cropland each wilaya actually holds, so it "
+                     "measures fire regime rather than size. **Total burned "
+                     "area** is the raw km² — useful, but it ranks wilayas "
+                     "largely by how big they are. **Years with fire** counts "
+                     "how often a wilaya burns at all.",
+            )
+            metric = MAP_METRICS[metric_label]
             st.plotly_chart(
-                build_choropleth(yr_min, yr_max, selected_wilaya, cat_key),
+                build_choropleth(yr_min, yr_max, selected_wilaya, cat_key,
+                                 metric),
                 key="burn_map", **STRETCH,
             )
+            if metric == "rate":
+                st.caption(
+                    "Cumulative burned area divided by the wilaya's own "
+                    f"burnable land, per year. Wilayas with under "
+                    f"{MIN_BURNABLE_KM2:.0f} km² of the selected cover types "
+                    "are shown as no data — the ratio is meaningless there. "
+                    "An incomplete final year is excluded from both sides."
+                )
+            elif metric == "total":
+                st.caption(
+                    "Raw km². A large wilaya burns more because it is large: "
+                    "Tlemcen and Sidi Bel Abbes rank high here but sit near "
+                    "12% of their burnable land, while Blida is tenth on area "
+                    "and first on share."
+                )
 
         with col_bar:
             st.subheader("📊 Annual Burned Area")
@@ -1176,7 +1331,21 @@ def main() -> None:
             st.plotly_chart(chart_trend_line(df_burn, title_suffix),
                             key="burn_trend", **STRETCH)
 
-        # ── Row 2: Seasonality + Land cover ─────────────────────────────────
+        # ── Row 2: Recurrence ───────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("🔁 Fire Recurrence")
+        st.plotly_chart(
+            chart_recurrence(yr_min, yr_max, cat_key, selected_wilaya,
+                             title_suffix),
+            key="burn_recurrence", **STRETCH,
+        )
+        st.caption(
+            "How often a place burns, not how much it lost. Totals point at "
+            "the single worst season; recurrence points at where the fire "
+            "regime keeps returning, which is what fuel management acts on."
+        )
+
+        # ── Row 3: Seasonality + Land cover ─────────────────────────────────
         st.markdown("---")
         col_season, col_cover = st.columns(2)
 
