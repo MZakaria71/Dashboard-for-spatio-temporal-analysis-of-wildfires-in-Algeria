@@ -1423,7 +1423,7 @@ def main() -> None:
 
     st.caption(
         "Algeria Wildfire Analysis · Built with Streamlit + Plotly · "
-        "Data: NASA MODIS via Google Earth Engine"
+        "Data: NASA MODIS"
     )
 
 
