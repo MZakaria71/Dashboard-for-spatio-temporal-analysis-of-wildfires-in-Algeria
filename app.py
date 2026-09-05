@@ -1166,7 +1166,16 @@ def render_weather_section(
 
     seasons = weather_seasons(w, wilaya, yr_min, yr_max)
     if seasons.empty:
-        st.warning("No weather data for this selection.")
+        covered = set(w["ADM1_NAME"].astype(str))
+        if wilaya != ALL_WILAYAS and wilaya not in covered:
+            st.info(
+                f"**{wilaya} is not in the fire-weather layer.** It is fetched "
+                f"only for the wilayas that actually record fires, since the "
+                f"rest have no fire weather worth the request. Add them with "
+                f"`python fetch_weather.py --all-wilayas`."
+            )
+        else:
+            st.warning("No weather data for this year range.")
         return
 
     latest = seasons.iloc[-1]

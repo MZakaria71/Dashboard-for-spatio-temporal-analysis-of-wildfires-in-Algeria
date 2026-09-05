@@ -31,10 +31,19 @@ Two choices worth knowing about
        daily maximum wind at or above FWD_WIND_KMH. The four raw drivers are
        stored alongside it, so anyone can apply a different rule.
 
+    By default only the wilayas that actually record fires are fetched — the
+    others have no fire weather worth a request against a volume-capped free
+    API, and the dashboard's national aggregate already excludes them.
+
 Usage
-    python fetch_weather.py                 # 2001 to today, all wilayas
+    python fetch_weather.py                 # 2001 to today, fire wilayas
+    python fetch_weather.py --all-wilayas   # include the Saharan units too
     python fetch_weather.py --start 2015-01-01
     python fetch_weather.py --limit 3       # a quick trial run
+
+    Open-Meteo's free tier caps by data volume, so a full run can exceed its
+    hourly limit partway through. Each wilaya is saved as it arrives; re-run
+    the same command and it resumes.
 """
 
 from __future__ import annotations
@@ -88,7 +97,7 @@ class RateLimited(RuntimeError):
     """The hourly cap — not worth waiting out inside one run."""
 
 
-def sampling_points(limit: int | None) -> pd.DataFrame:
+def sampling_points(limit: int | None, fire_only: bool = True) -> pd.DataFrame:
     """One lat/lon per wilaya: where that wilaya's fires actually happen."""
     if not IGNITION_FILE.exists():
         sys.exit(f"{IGNITION_FILE} not found — run prepare_ignitions.py first.")
@@ -123,6 +132,17 @@ def sampling_points(limit: int | None) -> pd.DataFrame:
 
     pts = (pd.DataFrame.from_dict(chosen, orient="index")
              .rename_axis("ADM1_NAME").reset_index())
+
+    if fire_only:
+        # The default. The dashboard's national aggregate already averages
+        # only these, and a wilaya with no recorded fires has no fire weather
+        # worth a request against a volume-capped free API.
+        skipped = int((pts["basis"] != "ignition centroid").sum())
+        pts = pts[pts["basis"] == "ignition centroid"]
+        if skipped:
+            print(f"  skipping {skipped} wilaya(s) with under "
+                  f"{MIN_IGNITIONS_FOR_CENTROID} recorded ignitions "
+                  f"(pass --all-wilayas to include them)")
 
     pts = pts.sort_values("ADM1_NAME").reset_index(drop=True)
     return pts.head(limit) if limit else pts
@@ -217,6 +237,9 @@ def main() -> None:
                    help="only the first N wilayas — for a trial run")
     p.add_argument("--refresh", action="store_true",
                    help="refetch every wilaya instead of resuming")
+    p.add_argument("--all-wilayas", action="store_true",
+                   help="include wilayas with no recorded fires (they are "
+                        "skipped by default — see sampling_points)")
     args = p.parse_args()
 
     start = pd.Timestamp(args.start).date()
@@ -224,7 +247,7 @@ def main() -> None:
     if start > end:
         sys.exit(f"--start {start} is after --end {end}.")
 
-    pts = sampling_points(args.limit)
+    pts = sampling_points(args.limit, fire_only=not args.all_wilayas)
     print(f"Fetching ERA5 daily weather for {len(pts)} wilayas, "
           f"{start} .. {end}")
     by_basis = pts["basis"].value_counts().to_dict()
