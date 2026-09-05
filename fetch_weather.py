@@ -89,8 +89,8 @@ FWD_WIND_KMH = 20.0
 MIN_IGNITIONS_FOR_CENTROID = 20
 
 PAUSE_S = 2.0          # be a polite client of a free service
-MAX_RETRIES = 6
-RETRY_WAIT_S = 65      # the minutely limit clears inside a retry loop
+MAX_RETRIES = 4
+RETRY_WAIT_S = 65      # the minutely limit clears in about a minute
 
 
 class RateLimited(RuntimeError):
@@ -172,11 +172,14 @@ def fetch_daily(lat: float, lon: float, start: date, end: date) -> pd.DataFrame:
             except Exception:
                 pass
             hourly = "hourly" in detail.lower()
-            if exc.code == 429 and not hourly and attempt < MAX_RETRIES - 1:
-                wait = RETRY_WAIT_S * (attempt + 1)
-                print(f"      rate limited; waiting {wait}s "
-                      f"(attempt {attempt + 1}/{MAX_RETRIES})")
-                time.sleep(wait)
+            # One wait for a minutely limit, then give up on this run. An
+            # escalating ladder here was spending a quarter of each hourly
+            # window sleeping, which is budget that could have been fetching:
+            # repeated minutely rejections mean the hourly budget is nearly
+            # gone anyway, and the caller resumes from disk.
+            if exc.code == 429 and not hourly and attempt == 0:
+                print(f"      minutely limit; waiting {RETRY_WAIT_S}s once")
+                time.sleep(RETRY_WAIT_S)
                 continue
             if exc.code == 429:
                 # The hourly cap will not clear inside any sane retry loop.
@@ -185,11 +188,14 @@ def fetch_daily(lat: float, lon: float, start: date, end: date) -> pd.DataFrame:
                 raise RateLimited(detail)
             raise SystemExit(f"Open-Meteo returned HTTP {exc.code}. {detail}")
         except urllib.error.URLError as exc:
+            # DNS and connection blips are transient. Retry briefly, then hand
+            # back a resumable stop rather than a hard exit — a moment of bad
+            # networking should not discard an hour of fetching.
             if attempt < MAX_RETRIES - 1:
-                print(f"      {exc.reason}; retrying in {RETRY_WAIT_S}s")
-                time.sleep(RETRY_WAIT_S)
+                print(f"      {exc.reason}; retrying in 20s")
+                time.sleep(20)
                 continue
-            raise SystemExit(f"Could not reach Open-Meteo: {exc.reason}")
+            raise RateLimited(f"network unreachable: {exc.reason}")
     if payload is None:
         raise SystemExit("Open-Meteo did not return data after retries.")
 
