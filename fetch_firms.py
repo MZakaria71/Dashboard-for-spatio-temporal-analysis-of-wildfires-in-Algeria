@@ -66,6 +66,7 @@ OUTPUT_DIR = Path(__file__).parent / "data"
 
 API = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 KEY_STATUS = "https://firms.modaps.eosdis.nasa.gov/mapserver/mapkey_status/"
+AVAILABILITY = "https://firms.modaps.eosdis.nasa.gov/api/data_availability/csv"
 
 # west,south,east,north — Algeria plus a small margin. prepare_ignitions.py
 # clips properly against the GAUL boundaries, so a loose box costs nothing but
@@ -101,10 +102,17 @@ def _get(url: str, key: str) -> str:
         with urllib.request.urlopen(url, timeout=120) as r:
             return r.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        raise FirmsError(
-            f"FIRMS returned HTTP {exc.code} ({exc.reason}). "
-            f"URL: {_redact(url, key)}"
-        ) from None
+        # HTTPError is itself a response: FIRMS explains a 400 in the body, and
+        # throwing that away turns a precise complaint into a bare status code.
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+        parts = [f"FIRMS returned HTTP {exc.code} ({exc.reason})."]
+        if detail:
+            parts.append("  It said: " + _redact(detail[:600], key))
+        parts.append("  URL: " + _redact(url, key))
+        raise FirmsError("\n".join(parts)) from None
     except urllib.error.URLError as exc:
         raise FirmsError(f"Could not reach FIRMS: {exc.reason}") from None
 
@@ -138,6 +146,57 @@ def check_key(key: str) -> None:
     shown = {k: v for k, v in info.items() if "key" not in k.lower()}
     if shown:
         print("  key status: " + ", ".join(f"{k}={v}" for k, v in shown.items()))
+
+
+def show_availability(key: str) -> None:
+    """Ask FIRMS which sources exist and how far back each one reaches.
+
+    A 400 from the area endpoint says nothing about which part of the request
+    was wrong. This endpoint answers it directly — the valid source names and
+    the date range each one covers — so a rejection turns into an answer
+    instead of a guessing game.
+    """
+    try:
+        body = _get(f"{AVAILABILITY}/{key}/ALL", key)
+    except FirmsError as exc:
+        print(f"\n  (could not read data availability: {exc})")
+        return
+    print("\n  FIRMS reports these sources and date ranges:")
+    for line in body.strip().splitlines()[:25]:
+        print("    " + line)
+
+
+def diagnose(key: str, source: str, bbox: str, start: date) -> None:
+    """Narrow down which part of a rejected request FIRMS objected to.
+
+    A 400 names no field, and the area endpoint has four of them. Each probe
+    below changes exactly one thing, so whichever one starts working is the
+    answer.
+    """
+    probes = [
+        ("same request, no date (most recent days instead)",
+         f"{API}/{key}/{source}/{bbox}/1"),
+        ("no date, small box over northern Algeria",
+         f"{API}/{key}/{source}/2,35,8,37/1"),
+        ("your date, small box",
+         f"{API}/{key}/{source}/2,35,8,37/1/{start:%Y-%m-%d}"),
+        ("VIIRS instead of MODIS, no date",
+         f"{API}/{key}/VIIRS_SNPP_NRT/{bbox}/1"),
+    ]
+    print("\n  Narrowing it down:")
+    for label, url in probes:
+        try:
+            body = _get(url, key)
+            ok = "latitude" in body.lstrip()[:400].lower()
+            rows = max(len(body.strip().splitlines()) - 1, 0)
+            print(f"    {'OK  ' if ok else 'odd '} {label}"
+                  + (f"  ({rows:,} rows)" if ok
+                     else "  -> " + _redact(body.strip()[:120], key)))
+        except FirmsError as exc:
+            first = str(exc).splitlines()
+            said = next((l.strip() for l in first if l.strip().startswith("It said:")),
+                        first[0])
+            print(f"    FAIL {label}  -> {said}")
 
 
 def fetch_window(key: str, source: str, bbox: str,
@@ -226,7 +285,14 @@ def main() -> None:
         frames = [fetch_window(key, args.source, args.bbox, s, d)
                   for s, d in daterange_chunks(start, today, MAX_DAYS_PER_REQUEST)]
     except FirmsError as exc:
-        sys.exit(f"\n{exc}")
+        print(f"\n{exc}")
+        if "HTTP 400" in str(exc):
+            print("\n  A 400 means FIRMS parsed the request and rejected it —"
+                  " the source name, the\n  bounding box, the day range or the"
+                  " date. Working out which:")
+            diagnose(key, args.source, args.bbox, start)
+            show_availability(key)
+        sys.exit(1)
 
     df = pd.concat(frames, ignore_index=True)
     if df.empty:
