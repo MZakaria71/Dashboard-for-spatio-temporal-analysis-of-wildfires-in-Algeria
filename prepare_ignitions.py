@@ -25,6 +25,18 @@ Expected input (place next to this script):
     Download: https://firms.modaps.eosdis.nasa.gov/download/
       Region "Algeria" (or a bounding box), full archive, CSV format.
 
+      The archive request also returns a fire_nrt_<PRODUCT>_<id> member in the
+      same zip, covering the months the quality-controlled archive has not
+      caught up with. Read it — do not go looking for another source for that
+      period.
+
+      A ready-made regional extract from the Active Fire Data page works too,
+      named <SENSOR>_<region>_<24h|48h|7d>.csv; see FIRMS_REGIONAL_PREFIXES.
+
+      To top the record up to today without re-requesting the archive:
+          python fetch_firms.py --since <last covered date>
+      Overlaps are de-duplicated on load, so fetching a period twice is safe.
+
 Boundaries (must match the burned-area tables — FAO GAUL 2015):
     data/gaul_adm2.geojson       exported by section 6 of gee_export.js
 
