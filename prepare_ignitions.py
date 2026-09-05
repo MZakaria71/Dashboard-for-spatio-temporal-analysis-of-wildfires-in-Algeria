@@ -470,10 +470,24 @@ def cluster_events(df: pd.DataFrame) -> pd.DataFrame:
 
     df = df.sort_values("acq_dt", kind="mergesort").reset_index(drop=True)
 
-    # Local equirectangular projection — accurate well below 1% at these scales.
-    lat0 = float(df["latitude"].mean())
-    x = df["longitude"].to_numpy() * 111.320 * np.cos(np.radians(lat0))
-    y = df["latitude"].to_numpy() * 110.574
+    # Local equirectangular projection, scaled by each point's OWN latitude.
+    #
+    # This used a single cosine taken from the dataset's mean latitude, which
+    # made the result depend on which files happened to be in data/: adding a
+    # regional extract covering Northern *and Central* Africa pulled the mean
+    # south, stretched the x axis, pushed pairs past EPS_KM and split single
+    # fires into several "ignitions" — 918 of them, spread across all 26 years
+    # because the constant is global. It was also simply wrong at the ends of
+    # Algeria's own range: a mean near 32 overstates x-distance by 5.5% at the
+    # northern fire belt and understates it by 10% in the deep south.
+    #
+    # Per-point is both composition-independent and more accurate. Two
+    # detections close enough to link differ in latitude by under 0.014°, so
+    # their scale factors agree to better than 0.03% — the embedding is exact
+    # at the only distances this function cares about.
+    lat = df["latitude"].to_numpy()
+    x = df["longitude"].to_numpy() * 111.320 * np.cos(np.radians(lat))
+    y = lat * 110.574
     xy = np.column_stack([x, y])
 
     day = (df["acq_dt"].dt.normalize() - df["acq_dt"].dt.normalize().min()).dt.days
