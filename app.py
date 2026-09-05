@@ -39,6 +39,12 @@ st.set_page_config(
 DATA_DIR = Path("data")
 IGNITION_FILE = DATA_DIR / "ignitions.parquet"
 DAILY_FILE = DATA_DIR / "event_daily.parquet"   # per-event growth curves
+WEATHER_FILE = DATA_DIR / "fire_weather.parquet"   # ERA5, by fetch_weather.py
+
+# Algeria's fire season. August dominates, but June through September is where
+# essentially all of the burned area sits, and a season-window comparison is
+# less noisy than a single month.
+FIRE_SEASON = (6, 7, 8, 9)
 # FAO GAUL 2015 wilaya boundaries, simplified to ~500 m by gee_export.js. Same
 # source as the burned-area tables, so the 48 wilayas match the data exactly —
 # unlike the old Dz_adm1.shp, which used the post-2019 58-wilaya scheme and left
@@ -1006,6 +1012,218 @@ def chart_burned_per_ignition(
     return fig
 
 
+# ── Fire weather ──────────────────────────────────────────────────────────────
+# Counts alone invite the wrong conclusion: 2021 had far fewer ignitions than
+# 2020 and burned Kabylie to the ground. This layer supplies the other half of
+# the question — whether a season's weather made fire easy.
+@st.cache_data(show_spinner=False)
+def load_weather() -> Optional[pd.DataFrame]:
+    if not WEATHER_FILE.exists():
+        return None
+    return pd.read_parquet(WEATHER_FILE)
+
+
+def weather_seasons(
+    w: pd.DataFrame, wilaya: str, yr_min: int, yr_max: int,
+) -> pd.DataFrame:
+    """Fire-season weather per year, averaged over the wilayas in scope.
+
+    Averaged rather than summed: a national total would just count wilayas.
+    And when no wilaya is chosen, only those sampled at an ignition centroid
+    are averaged — the Saharan units bake at 45 C with 10% humidity every
+    summer and have nothing to burn, so including them would swamp the signal
+    with weather that never starts a fire.
+    """
+    season = w[w["month"].isin(FIRE_SEASON)
+               & (w["year"] >= yr_min) & (w["year"] <= yr_max)]
+    if wilaya != ALL_WILAYAS:
+        season = season[season["ADM1_NAME"] == wilaya]
+    elif "sample_basis" in season.columns:
+        season = season[season["sample_basis"].astype(str) == "ignition centroid"]
+    if season.empty:
+        return season
+
+    per_wilaya = season.groupby(["ADM1_NAME", "year"], observed=True).agg(
+        fire_weather_days=("fire_weather_days", "sum"),
+        t_max_c=("t_max_c", "mean"),
+        rh_min_pct=("rh_min_pct", "mean"),
+        wind_max_kmh=("wind_max_kmh", "mean"),
+        precip_mm=("precip_mm", "sum"),
+    ).reset_index()
+    return per_wilaya.groupby("year", observed=True).mean(
+        numeric_only=True).reset_index()
+
+
+def chart_fire_weather_days(seasons: pd.DataFrame, suffix: str) -> go.Figure:
+    """Fire-weather days per season against the period's own normal."""
+    if seasons.empty:
+        return _empty_fig("No weather data in this selection")
+    normal = float(seasons["fire_weather_days"].median())
+    colours = ["#9D0208" if v >= normal else "#F48C06"
+               for v in seasons["fire_weather_days"]]
+    fig = px.bar(
+        seasons, x="year", y="fire_weather_days",
+        title=f"Fire-Weather Days per Season{suffix}",
+        labels={"year": "Year", "fire_weather_days": "Days (Jun–Sep)"},
+        template="plotly_white",
+    )
+    fig.update_traces(marker_color=colours)
+    fig.add_hline(y=normal, line_dash="dash", line_color="#495057",
+                  annotation_text=f"median {normal:.0f}",
+                  annotation_position="top left")
+    fig.update_layout(showlegend=False, xaxis=dict(dtick=2))
+    return fig
+
+
+def chart_weather_vs_fire(
+    seasons: pd.DataFrame, ign: Optional[pd.DataFrame],
+    wilaya: str, suffix: str,
+) -> go.Figure:
+    """Fire-weather days against ignitions, one point per year.
+
+    The point of the whole layer: a year sitting far above the cloud burned
+    despite ordinary weather, which points at ignition pressure; one far to
+    the right burned in conditions that would have carried any spark.
+    """
+    if seasons.empty or ign is None or ign.empty:
+        return _empty_fig("Needs both weather and ignition data")
+
+    fires = ign[ign["month"].isin(FIRE_SEASON)]
+    if wilaya != ALL_WILAYAS:
+        fires = fires[fires["ADM1_NAME"] == wilaya]
+    counts = fires.groupby("year").size().rename("ignitions").reset_index()
+
+    merged = seasons.merge(counts, on="year", how="inner")
+    if merged.empty:
+        return _empty_fig("No overlapping years")
+
+    fig = px.scatter(
+        merged, x="fire_weather_days", y="ignitions", text="year",
+        title=f"Weather against Ignitions{suffix}",
+        labels={"fire_weather_days": "Fire-weather days (Jun–Sep)",
+                "ignitions": "Ignitions (Jun–Sep)"},
+        template="plotly_white",
+    )
+    fig.update_traces(
+        marker=dict(size=11, color="#9D0208", opacity=0.8),
+        textposition="top center", textfont=dict(size=9, color="#495057"),
+        hovertemplate="<b>%{text}</b><br>%{x:.0f} fire-weather days"
+                      "<br>%{y:,} ignitions<extra></extra>",
+    )
+    fig.update_layout(showlegend=False)
+    return fig
+
+
+def chart_weather_drivers(seasons: pd.DataFrame, suffix: str) -> go.Figure:
+    """The four drivers as deviations from their own period mean.
+
+    Plotted as anomalies because the raw units share no scale — 34 °C, 22%,
+    25 km/h and 12 mm cannot sit on one axis and be read.
+    """
+    if seasons.empty or len(seasons) < 2:
+        return _empty_fig("Not enough years to show anomalies")
+    fields = {
+        "t_max_c": "Max temperature",
+        "rh_min_pct": "Min humidity",
+        "wind_max_kmh": "Max wind",
+        "precip_mm": "Rainfall",
+    }
+    fig = go.Figure()
+    for col, label in fields.items():
+        series = seasons[col]
+        sd = float(series.std())
+        if not sd:
+            continue
+        fig.add_trace(go.Scatter(
+            x=seasons["year"], y=(series - series.mean()) / sd,
+            mode="lines+markers", name=label,
+            hovertemplate=f"{label}: %{{y:+.2f}} sd<extra></extra>",
+        ))
+    fig.add_hline(y=0, line_color="#ADB5BD", line_width=1)
+    fig.update_layout(
+        title=f"Fire-Season Drivers{suffix}", template="plotly_white",
+        yaxis_title="Standard deviations from the period mean",
+        xaxis_title="Year", xaxis=dict(dtick=2), hovermode="x unified",
+        legend=dict(orientation="h", y=1.1, x=0, yanchor="bottom"),
+    )
+    return fig
+
+
+def render_weather_section(
+    wilaya: str, yr_min: int, yr_max: int, suffix: str,
+) -> None:
+    st.subheader("🌡️ Fire Weather")
+
+    w = load_weather()
+    if w is None:
+        st.info(
+            "**No fire-weather data yet.** This panel needs "
+            "`data/fire_weather.parquet`.\n\n"
+            "Build it with `python fetch_weather.py` — it pulls ERA5 daily "
+            "reanalysis from the Open-Meteo archive, which needs no API key."
+        )
+        return
+
+    seasons = weather_seasons(w, wilaya, yr_min, yr_max)
+    if seasons.empty:
+        st.warning("No weather data for this selection.")
+        return
+
+    latest = seasons.iloc[-1]
+    normal = seasons["fire_weather_days"].median()
+    hottest = seasons.loc[seasons["t_max_c"].idxmax()]
+    driest = seasons.loc[seasons["precip_mm"].idxmin()]
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"🔥 Fire-weather days {int(latest['year'])}",
+              f"{latest['fire_weather_days']:.0f}",
+              f"{latest['fire_weather_days'] - normal:+.0f} vs median",
+              delta_color="inverse")
+    k2.metric("📊 Season median", f"{normal:.0f} days")
+    k3.metric("🌡️ Hottest season", f"{int(hottest['year'])}",
+              f"{hottest['t_max_c']:.1f} °C mean daily max", delta_color="off")
+    k4.metric("🏜️ Driest season", f"{int(driest['year'])}",
+              f"{driest['precip_mm']:.0f} mm total", delta_color="off")
+
+    st.caption(
+        f"A **fire-weather day** is a day whose maximum temperature reached "
+        f"30 °C, minimum humidity fell to 30% or below, and maximum wind "
+        f"reached 20 km/h — an explicit rule, not a named index, so the four "
+        f"drivers below can be read against it. Season is June–September."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(chart_fire_weather_days(seasons, suffix),
+                        key="wx_days", **STRETCH)
+    with c2:
+        st.plotly_chart(
+            chart_weather_vs_fire(seasons, load_ignitions(), wilaya, suffix),
+            key="wx_vs_fire", **STRETCH,
+        )
+    st.caption(
+        "A year high on the ignition axis but ordinary on the weather axis "
+        "burned because something started fires, not because conditions were "
+        "exceptional. A year far to the right faced conditions that would "
+        "have carried almost any spark."
+    )
+
+    st.plotly_chart(chart_weather_drivers(seasons, suffix),
+                    key="wx_drivers", **STRETCH)
+
+    basis = w[w["ADM1_NAME"] == wilaya]["sample_basis"] if wilaya != ALL_WILAYAS \
+        else pd.Series(dtype=object)
+    where = (f"sampled at {basis.iloc[0]}" if len(basis)
+             else "averaged over the wilayas that actually record fires")
+    st.caption(
+        f"ERA5 reanalysis (~11 km), {where}. Each wilaya is sampled at the "
+        f"mean position of its own ignitions rather than its geometric centre, "
+        f"so the series describes conditions where that wilaya burns rather "
+        f"than an average over land that never does. Rebuild with "
+        f"`python fetch_weather.py`."
+    )
+
+
 # ── Fire event catalogue ──────────────────────────────────────────────────────
 # Every other panel aggregates events into counts and totals, which answers
 # "how much" and never "which fire". The August 2021 Kabylie disaster is in
@@ -1467,9 +1685,9 @@ def main() -> None:
     # raises inside its own widget-state serialisation — which would leave the
     # whole ignition half untestable.
     BURN_VIEW, IGN_VIEW = "🔥 Burned area", "🎯 Ignitions"
-    EVENT_VIEW = "📇 Fire events"
+    EVENT_VIEW, WX_VIEW = "📇 Fire events", "🌡️ Fire weather"
     view = st.radio(
-        "Section", [BURN_VIEW, IGN_VIEW, EVENT_VIEW], horizontal=True,
+        "Section", [BURN_VIEW, IGN_VIEW, EVENT_VIEW, WX_VIEW], horizontal=True,
         key="main_view", label_visibility="collapsed",
     )
 
@@ -1571,11 +1789,14 @@ def main() -> None:
             yr_min, yr_max, title_suffix,
         )
 
-    else:
+    elif view == EVENT_VIEW:
         render_event_catalogue(
             load_ignitions(), selected_wilaya, commune_code,
             yr_min, yr_max, title_suffix,
         )
+
+    else:
+        render_weather_section(selected_wilaya, yr_min, yr_max, title_suffix)
 
     # ── Data notes ────────────────────────────────────────────────────────────
     st.markdown("---")
