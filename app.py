@@ -10,7 +10,8 @@ Dashboard startup: < 1 second (previously: minutes).
 Data source: MODIS MCD64A1 (burned area) + MCD12Q1 (land cover) via Google Earth Engine
 Spatial resolution: ADM1 (wilaya) and ADM2 (commune) level
 
-Author: Zakaria Matougui, researcher at Territory Research Centre (CRAT)
+Author: Zakaria Matougui, researcher at Territory Planning Research Centre
+        (CRAT), Algeria
 """
 from __future__ import annotations
 
@@ -1156,8 +1157,8 @@ def main() -> None:
 
     st.title(f"🔥 Algeria Wildfire Analysis ({data_yr_min}–{data_yr_max})")
     st.caption(
-        "**Author:** Zakaria Matougui, researcher at Territory Research "
-        "Centre (CRAT) · "
+        "**Author:** Zakaria Matougui, researcher at Territory Planning "
+        "Research Centre (CRAT), Algeria · "
         "**Data:** MODIS MCD64A1 (burned area) + MCD12Q1 (land cover)"
     )
     st.markdown("---")
