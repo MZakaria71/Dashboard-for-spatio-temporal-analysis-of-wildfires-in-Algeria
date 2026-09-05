@@ -144,7 +144,12 @@ def sampling_points(limit: int | None, fire_only: bool = True) -> pd.DataFrame:
                   f"{MIN_IGNITIONS_FOR_CENTROID} recorded ignitions "
                   f"(pass --all-wilayas to include them)")
 
-    pts = pts.sort_values("ADM1_NAME").reset_index(drop=True)
+    # Busiest first, not alphabetical. Open-Meteo's free tier will not serve
+    # the whole record in one window, so a run is usually interrupted — and
+    # what it managed to fetch should be the wilayas that carry the fires.
+    # Alphabetical order stopped at Guelma and left out Skikda, Tizi Ouzou,
+    # Jijel and Medea: four of the six busiest, and the Kabylie fire with them.
+    pts = pts.sort_values("n_ignitions", ascending=False).reset_index(drop=True)
     return pts.head(limit) if limit else pts
 
 
