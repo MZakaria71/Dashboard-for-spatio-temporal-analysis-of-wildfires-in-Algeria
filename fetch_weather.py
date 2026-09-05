@@ -303,12 +303,18 @@ def main() -> None:
             daily = fetch_daily(float(row["lat"]), float(row["lon"]), start, end)
         except RateLimited as exc:
             save()
-            print(f"\n  Open-Meteo's hourly limit reached after "
-                  f"{len(done) + i - 1} of {len(pts)} wilayas.")
+            # Both caps arrive as a 429 and only the message tells them apart.
+            # Reporting a daily cap as hourly had the retry loop sleeping an
+            # hour and trying again into a budget that refills at midnight.
+            daily_cap = "daily" in str(exc).lower()
+            print(f"\n  Open-Meteo's {'daily' if daily_cap else 'hourly'} limit "
+                  f"reached after {len(done) + i - 1} of {len(pts)} wilayas.")
             print(f"  {exc}")
-            print(f"\n  Progress is saved. Re-run the same command in an hour "
-                  f"and it will\n  continue from {row['ADM1_NAME']}.")
-            sys.exit(2)
+            print(f"\n  Progress is saved. Re-run the same command "
+                  f"{'tomorrow' if daily_cap else 'in an hour'} and it will"
+                  f"\n  continue from {row['ADM1_NAME']}.")
+            # Exit 3 means "not until tomorrow", so a loop can stop waiting.
+            sys.exit(3 if daily_cap else 2)
         m = monthly(daily)
         m.insert(0, "ADM1_NAME", str(row["ADM1_NAME"]))
         m["sample_lat"] = float(row["lat"])
