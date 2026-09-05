@@ -38,9 +38,15 @@ covered adds nothing rather than double-counting it.
 
         python prepare_ignitions.py
 
-    The FIRMS API serves at most 10 days per request, so longer windows are
+    The FIRMS API serves at most 5 days per request, so longer windows are
     fetched in chunks. Requests are also rate-limited per key (the limit and
     your current usage are printed before anything is fetched).
+
+    The near-real-time sources are a rolling window — MODIS_NRT holds roughly
+    four months — so this checks what FIRMS actually covers before fetching
+    and clamps the window to it. For anything older, MODIS_SP is the archive
+    equivalent and picks up exactly where MODIS_NRT stops; for a bulk backfill
+    the zip from the Download page beats 5 days per request.
 """
 
 from __future__ import annotations
@@ -73,7 +79,10 @@ AVAILABILITY = "https://firms.modaps.eosdis.nasa.gov/api/data_availability/csv"
 # a few rows.
 ALGERIA_BBOX = "-9.0,18.5,12.5,37.5"
 
-MAX_DAYS_PER_REQUEST = 10          # hard API limit
+# Hard API limit. FIRMS rejects anything else with
+# "Invalid day range. Expects [1..5]" — the number is not documented next to
+# the endpoint, so if it changes the error text now says so plainly.
+MAX_DAYS_PER_REQUEST = 5
 
 # FIRMS API source names, and the product code prepare_ignitions.py knows them
 # by. The output filename carries the product code so _wanted() matches it
@@ -148,14 +157,30 @@ def check_key(key: str) -> None:
         print("  key status: " + ", ".join(f"{k}={v}" for k, v in shown.items()))
 
 
-def show_availability(key: str) -> None:
-    """Ask FIRMS which sources exist and how far back each one reaches.
+def fetch_availability(key: str) -> dict[str, tuple[date, date]]:
+    """What each FIRMS source covers, as {source: (min_date, max_date)}.
 
-    A 400 from the area endpoint says nothing about which part of the request
-    was wrong. This endpoint answers it directly — the valid source names and
-    the date range each one covers — so a rejection turns into an answer
-    instead of a guessing game.
+    Worth one call per run. The near-real-time sources are a rolling window —
+    MODIS_NRT holds only about four months — so a --since older than that
+    silently returns nothing useful, and asking first turns that into a
+    sentence instead of an empty file.
     """
+    body = _get(f"{AVAILABILITY}/{key}/ALL", key)
+    table = pd.read_csv(StringIO(body))
+    out: dict[str, tuple[date, date]] = {}
+    for _, r in table.iterrows():
+        try:
+            out[str(r["data_id"])] = (
+                pd.to_datetime(r["min_date"]).date(),
+                pd.to_datetime(r["max_date"]).date(),
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
+def show_availability(key: str) -> None:
+    """Print what FIRMS says it holds — the answer to most rejected requests."""
     try:
         body = _get(f"{AVAILABILITY}/{key}/ALL", key)
     except FirmsError as exc:
@@ -235,7 +260,8 @@ def main() -> None:
     )
     g = p.add_mutually_exclusive_group()
     g.add_argument("--days", type=int, default=10,
-                   help="how many days back from today (default 10)")
+                   help="how many days back from today (default 10). FIRMS "
+                        "serves 5 days per request, so this is chunked.")
     g.add_argument("--since", metavar="YYYY-MM-DD",
                    help="fetch from this date to today instead")
     p.add_argument("--source", default="MODIS_NRT", choices=sorted(SOURCES),
@@ -275,15 +301,42 @@ def main() -> None:
         start = today - timedelta(days=args.days - 1)
 
     product = SOURCES[args.source]
-    span = (today - start).days + 1
-    n_requests = len(list(daterange_chunks(start, today, MAX_DAYS_PER_REQUEST)))
-
-    print(f"Fetching {args.source} ({product}) for {start} .. {today} "
-          f"— {span} days in {n_requests} request(s)")
+    end = today
     try:
         check_key(key)
+        cover = fetch_availability(key)
+    except FirmsError as exc:
+        sys.exit(f"\n{exc}")
+
+    if args.source in cover:
+        lo, hi = cover[args.source]
+        print(f"  {args.source} holds {lo} .. {hi}")
+        if start < lo:
+            # The NRT sources are a rolling window, so this is routine rather
+            # than an error — say what is being skipped and where it lives.
+            older = [s for s, p in SOURCES.items()
+                     if p == product and s != args.source and s in cover
+                     and cover[s][0] <= start]
+            print(f"  !! {start} predates it; starting at {lo} instead.")
+            if older:
+                print(f"     Earlier days are in {', '.join(older)} — but for a "
+                      f"bulk backfill\n     the archive zip from the Download "
+                      f"page is far cheaper than\n     {MAX_DAYS_PER_REQUEST}"
+                      f" days per request.")
+            start = lo
+        if end > hi:
+            print(f"  !! {hi} is the latest it holds; stopping there.")
+            end = hi
+        if start > end:
+            sys.exit(f"\nNothing to fetch: {args.source} covers {lo} .. {hi}.")
+
+    span = (end - start).days + 1
+    n_requests = len(list(daterange_chunks(start, end, MAX_DAYS_PER_REQUEST)))
+    print(f"Fetching {args.source} ({product}) for {start} .. {end} "
+          f"— {span} days in {n_requests} request(s)")
+    try:
         frames = [fetch_window(key, args.source, args.bbox, s, d)
-                  for s, d in daterange_chunks(start, today, MAX_DAYS_PER_REQUEST)]
+                  for s, d in daterange_chunks(start, end, MAX_DAYS_PER_REQUEST)]
     except FirmsError as exc:
         print(f"\n{exc}")
         if "HTTP 400" in str(exc):
@@ -319,7 +372,7 @@ def main() -> None:
     print(f"\nOK  {out}")
     print(f"  {len(df):,} detections | {covered[0]} .. {covered[-1]}")
 
-    missing = [d for d in pd.date_range(start, today, freq="D").date
+    missing = [d for d in pd.date_range(start, end, freq="D").date
                if d not in set(covered)]
     if missing:
         shown = ", ".join(str(d) for d in missing[:8])
