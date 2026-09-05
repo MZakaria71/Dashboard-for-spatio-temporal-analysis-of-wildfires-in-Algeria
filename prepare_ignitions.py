@@ -70,6 +70,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 BOUNDARY_FILE  = OUTPUT_DIR / "gaul_adm2.geojson"   # FAO GAUL 2015 ADM1 + ADM2
 OUTPUT_FILE    = OUTPUT_DIR / "ignitions.parquet"
+DAILY_FILE     = OUTPUT_DIR / "event_daily.parquet"   # growth curves
 
 # FIRMS downloads land as a zipped shapefile or CSV; look in both the script
 # directory and data/.
@@ -525,22 +526,39 @@ def cluster_events(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── 4. ignitions ───────────────────────────────────────────────────────────
+def _ground_cell(df: pd.DataFrame) -> pd.Series:
+    """A 1 km ground cell id, so the same patch seen twice counts once.
+
+    FIRMS reports a detection's centroid, which shifts between overpasses with
+    scan geometry, so the same burning ground yields slightly different
+    coordinates each time. Snapping to a 1 km grid in projected space — the
+    same per-point projection cluster_events uses, so it is latitude-correct —
+    makes repeat views of one patch collapse onto one cell.
+    """
+    xkm = df["longitude"].to_numpy() * 111.320 * np.cos(np.radians(
+        df["latitude"].to_numpy()))
+    ykm = df["latitude"].to_numpy() * 110.574
+    return pd.Series(
+        np.rint(xkm).astype("int64") * 100_000 + np.rint(ykm).astype("int64"),
+        index=df.index, name="cell",
+    )
+
+
 def derive_ignitions(df: pd.DataFrame) -> pd.DataFrame:
     """Earliest detection of each event, plus event-level attributes."""
-    # Pixel footprint from the FIRMS along-scan / along-track dimensions.
-    nominal = pd.Series(
-        np.where(df["instrument"].str.upper().str.startswith("V"),
-                 0.375 ** 2, 1.0),
-        index=df.index,
-    )
-    if {"scan", "track"} <= set(df.columns):
-        # Only some sources carry the real scan geometry. Concatenating one
-        # that does not leaves NaN here, and a NaN sum reports a footprint of
-        # exactly zero rather than failing — which is how 18% of the 2026
-        # events came to claim no area at all. Fall back per row, not per file.
-        df["px_km2"] = (df["scan"] * df["track"]).fillna(nominal)
-    else:
-        df["px_km2"] = nominal
+    # Extent is the ground actually seen burning: distinct 1 km cells, not the
+    # sum of per-detection pixel areas.
+    #
+    # Summing pixel area per detection double-counts every re-observation. It
+    # made one 301-detection event claim 704 km² from 13 distinct cells, and
+    # inflated 40% of all events by more than 2x — the Kabylie fire read
+    # 1,105 km² against 241 cells. That number cannot be called a lower bound
+    # on burned area, which is how the dashboard described it.
+    #
+    # Counting cells is a genuine lower bound again: area burning between
+    # overpasses, under cloud, or below a 1 km pixel is still missed, but
+    # nothing is counted twice.
+    df["cell"] = _ground_cell(df)
 
     events = df.groupby("event_id", sort=False).agg(
         n_detections=("event_id", "size"),
@@ -548,8 +566,9 @@ def derive_ignitions(df: pd.DataFrame) -> pd.DataFrame:
         last_dt=("acq_dt", "max"),
         frp_max_mw=("frp", "max"),
         frp_sum_mw=("frp", "sum"),
-        footprint_km2=("px_km2", "sum"),
+        extent_km2=("cell", "nunique"),
     )
+    events["extent_km2"] = events["extent_km2"].astype("float32")
     events["duration_days"] = (
         (events["last_dt"] - events["first_dt"]).dt.total_seconds() / 86400.0
     )
@@ -590,6 +609,44 @@ def derive_ignitions(df: pd.DataFrame) -> pd.DataFrame:
     ign["hour_local"] = local.dt.hour.astype("int8")
     ign["season"]     = ign["month"].map(SEASON_MAP).astype("category")
     return ign
+
+
+def daily_progression(df: pd.DataFrame, ign: pd.DataFrame) -> pd.DataFrame:
+    """One row per event per day: how the fire grew.
+
+    `ignitions.parquet` holds one row per event, which is enough to rank fires
+    but not to show how any of them developed. This is the companion table.
+
+    `new_cells` counts ground cells seen for the first time on that day, so a
+    running sum is the detected extent over time — a growth curve. Re-detecting
+    yesterday's ground adds detections and radiative power but no new area,
+    which is exactly the distinction the extent fix above is about.
+    """
+    keep = df[df["event_id"].isin(set(ign["event_id"]))].copy()
+    keep["day"] = keep["acq_dt"].dt.normalize()
+
+    # A cell counts as new on the first day the event saw it.
+    first_seen = keep.groupby(["event_id", "cell"])["day"].transform("min")
+    keep["is_new"] = (keep["day"] == first_seen) & ~keep.duplicated(
+        subset=["event_id", "cell"])
+
+    daily = keep.groupby(["event_id", "day"], sort=True).agg(
+        n_detections=("event_id", "size"),
+        frp_sum_mw=("frp", "sum"),
+        new_cells=("is_new", "sum"),
+    ).reset_index()
+
+    ids = ign.set_index("event_id")["ignition_id"]
+    daily["ignition_id"] = daily["event_id"].map(ids).astype("int32")
+    first_day = daily.groupby("ignition_id")["day"].transform("min")
+    daily["day_offset"] = (daily["day"] - first_day).dt.days.astype("int16")
+
+    out = daily[["ignition_id", "day", "day_offset",
+                 "n_detections", "frp_sum_mw", "new_cells"]].copy()
+    out["n_detections"] = out["n_detections"].astype("int16")
+    out["new_cells"] = out["new_cells"].astype("int16")
+    out["frp_sum_mw"] = out["frp_sum_mw"].astype("float32")
+    return out.sort_values(["ignition_id", "day"]).reset_index(drop=True)
 
 
 # ── 5. admin join ──────────────────────────────────────────────────────────
@@ -705,7 +762,7 @@ OUT_COLS = [
     "season", "ADM1_CODE", "ADM1_NAME", "ADM2_CODE", "ADM2_NAME",
     "instrument", "satellite", "confidence_raw", "daynight",
     "frp_mw", "frp_max_mw", "frp_sum_mw",
-    "n_detections", "duration_days", "footprint_km2", "source",
+    "n_detections", "duration_days", "extent_km2", "source",
 ]
 
 
@@ -758,14 +815,22 @@ def main() -> None:
         ["instrument", "satellite", "daynight", "source"]
     ].astype("category")
     for c in ("frp_mw", "frp_max_mw", "frp_sum_mw", "duration_days",
-              "footprint_km2", "lat", "lon"):
+              "extent_km2", "lat", "lon"):
         ign[c] = ign[c].astype("float32")
     ign["n_detections"] = ign["n_detections"].astype("int32")
+
+    print("\n7. Daily progression")
+    daily = daily_progression(df, ign)
+    daily.to_parquet(DAILY_FILE, index=False)
+    multi = int((daily.groupby("ignition_id").size() > 1).sum())
+    print(f"  {len(daily):,} event-days for {daily['ignition_id'].nunique():,} "
+          f"events; {multi:,} ran for more than one day")
 
     out = ign[[c for c in OUT_COLS if c in ign.columns]]
     out.to_parquet(OUTPUT_FILE, index=False)
 
-    print(f"\nOK  {OUTPUT_FILE}  ({OUTPUT_FILE.stat().st_size / 1e6:.2f} MB)")
+    print(f"\nOK  {DAILY_FILE}  ({DAILY_FILE.stat().st_size / 1e6:.2f} MB)")
+    print(f"OK  {OUTPUT_FILE}  ({OUTPUT_FILE.stat().st_size / 1e6:.2f} MB)")
     print(f"  {len(out):,} ignitions | {out['year'].min()}-{out['year'].max()} | "
           f"{out['ADM1_NAME'].nunique()} wilayas")
     print("\n  Ignitions per year:")

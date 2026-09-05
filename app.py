@@ -38,6 +38,7 @@ st.set_page_config(
 # ── Constants ─────────────────────────────────────────────────────────────────
 DATA_DIR = Path("data")
 IGNITION_FILE = DATA_DIR / "ignitions.parquet"
+DAILY_FILE = DATA_DIR / "event_daily.parquet"   # per-event growth curves
 # FAO GAUL 2015 wilaya boundaries, simplified to ~500 m by gee_export.js. Same
 # source as the burned-area tables, so the 48 wilayas match the data exactly —
 # unlike the old Dz_adm1.shp, which used the post-2019 58-wilaya scheme and left
@@ -966,15 +967,15 @@ def chart_ign_season_timing(
 
 def chart_ign_size_dist(df: pd.DataFrame, suffix: str) -> go.Figure:
     """Fire size is heavy-tailed: a few events dominate the burned total."""
-    if df.empty or "footprint_km2" not in df.columns:
+    if df.empty or "extent_km2" not in df.columns:
         return _empty_fig("No ignitions in this selection")
-    sizes = df.loc[df["footprint_km2"] > 0, "footprint_km2"]
+    sizes = df.loc[df["extent_km2"] > 0, "extent_km2"]
     if sizes.empty:
         return _empty_fig("No sized events in this selection")
     fig = px.histogram(
-        sizes, x="footprint_km2", nbins=40, log_y=True,
+        sizes, x="extent_km2", nbins=40, log_y=True,
         title=f"Fire Event Size Distribution{suffix}",
-        labels={"footprint_km2": "Detected footprint (km²)"},
+        labels={"extent_km2": "Detected extent (km²)"},
         template="plotly_white", color_discrete_sequence=["#6A040F"],
     )
     fig.update_layout(showlegend=False, yaxis_title="Events (log scale)")
@@ -1010,7 +1011,7 @@ def chart_burned_per_ignition(
 # "how much" and never "which fire". The August 2021 Kabylie disaster is in
 # this dataset and was unreachable through the UI until this section existed.
 EVENT_RANKS = {
-    "Detected footprint": ("footprint_km2", "%.0f km²"),
+    "Detected extent": ("extent_km2", "%.0f km²"),
     "Cumulative FRP":     ("frp_sum_mw",    "%,.0f MW"),
     "Peak FRP":           ("frp_max_mw",    "%,.0f MW"),
     "Detections":         ("n_detections",  "%d"),
@@ -1028,7 +1029,7 @@ def event_table(df: pd.DataFrame, rank_by: str, top_n: int) -> pd.DataFrame:
         "Wilaya": top["ADM1_NAME"].astype(str),
         # Cast before rounding: these are float32 on disk, and rounding one
         # in place leaves values like 28.200001 in the table.
-        "Footprint (km²)": top["footprint_km2"].astype("float64").round(0),
+        "Extent (km²)": top["extent_km2"].astype("float64").round(0),
         "Detections": top["n_detections"],
         "Days": top["duration_days"].astype("float64").round(1),
         "Peak FRP (MW)": top["frp_max_mw"].astype("float64").round(0),
@@ -1039,6 +1040,49 @@ def event_table(df: pd.DataFrame, rank_by: str, top_n: int) -> pd.DataFrame:
     # traced back to its ignition without re-deriving anything.
     out.attrs["rows"] = top.reset_index(drop=True)
     return out.reset_index(drop=True)
+
+
+@st.cache_data(show_spinner=False)
+def load_daily() -> Optional[pd.DataFrame]:
+    """Per-event daily progression, written alongside the ignitions."""
+    if not DAILY_FILE.exists():
+        return None
+    return pd.read_parquet(DAILY_FILE)
+
+
+def chart_growth(daily: pd.DataFrame, row: pd.Series) -> go.Figure:
+    """How one fire developed: extent gained per day against total reached.
+
+    New cells rather than detections, because re-detecting yesterday's ground
+    adds radiative power but no area. The two together separate a fire that
+    kept spreading from one that burned hard in place.
+    """
+    d = daily[daily["ignition_id"] == row["ignition_id"]].sort_values("day")
+    if d.empty:
+        return _empty_fig("No daily record for this event")
+    d = d.copy()
+    d["cumulative"] = d["new_cells"].cumsum()
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=d["day"], y=d["new_cells"], name="New extent that day",
+        marker_color="#F48C06",
+        hovertemplate="%{x|%d %b}<br>%{y} km² newly detected<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=d["day"], y=d["cumulative"], name="Cumulative extent",
+        mode="lines+markers", line=dict(color="#9D0208", width=2.5),
+        hovertemplate="%{x|%d %b}<br>%{y} km² total<extra></extra>",
+    ))
+    single = len(d) == 1
+    fig.update_layout(
+        title="Growth" + (" — seen on a single day" if single else ""),
+        template="plotly_white", margin=dict(l=0, r=10, t=40, b=0),
+        yaxis_title="km² (1 km cells)", xaxis_title="",
+        legend=dict(orientation="h", y=1.12, x=0, yanchor="bottom"),
+        bargap=0.35,
+    )
+    return fig
 
 
 def map_single_event(row: pd.Series, context: pd.DataFrame) -> go.Figure:
@@ -1130,12 +1174,16 @@ def render_event_catalogue(
             rank_col, _ = EVENT_RANKS[rank_by]
             better = int((df[rank_col] > picked[rank_col]).sum()) + 1
             e1, e2 = st.columns(2)
-            e1.metric("🔥 Detected footprint",
-                      f"{picked['footprint_km2']:,.0f} km²")
+            e1.metric("🔥 Detected extent",
+                      f"{picked['extent_km2']:,.0f} km²")
             e2.metric("🛰️ Detections", f"{int(picked['n_detections']):,}")
             e3, e4 = st.columns(2)
             e3.metric("⚡ Peak FRP", f"{picked['frp_max_mw']:,.0f} MW")
             e4.metric("⏱️ Duration", f"{picked['duration_days']:.1f} days")
+            daily = load_daily()
+            if daily is not None:
+                st.plotly_chart(chart_growth(daily, picked),
+                                key="event_growth", **STRETCH)
             st.caption(
                 f"Ranked **#{better:,}** of {len(df):,} events in this "
                 f"selection by {rank_by.lower()}. First detected "
@@ -1147,10 +1195,10 @@ def render_event_catalogue(
                            "industrial sources, and not reprocessed.")
 
     st.caption(
-        "**Detected footprint is a lower bound on burned area, not a "
-        "measurement of it.** It counts the ground area of pixels flagged at "
-        "an overpass, so a fire burning between overpasses, or under cloud, or "
-        "smaller than a 1 km MODIS pixel, is undercounted or missed entirely. "
+        "**Detected extent counts distinct 1 km ground cells**, so a patch "
+        "seen on five overpasses counts once. It is a lower bound on burned "
+        "area, not a measurement: ground that burns between overpasses, under "
+        "cloud, or below a 1 km MODIS pixel is missed entirely. "
         "**Cumulative FRP sums instantaneous readings** across detections, so "
         "it rewards fires that happened to be seen more often — compare it "
         "against detection count rather than reading it as released energy."
@@ -1282,8 +1330,8 @@ def render_ignition_section(
     st.caption(
         "Ignitions are derived from NASA FIRMS active-fire detections, clustered "
         "in space and time into fire events; the earliest detection of each event "
-        "is its ignition. Detected footprint is a lower bound — it counts only "
-        "pixels flagged at an overpass, so it is not the true burned area. "
+        "is its ignition. Detected extent is a lower bound — it counts distinct "
+        "1 km cells flagged at an overpass, so it is not the true burned area. "
         "Ignition counts are **not** filtered by land cover: FIRMS detections "
         "carry no land-cover attribute."
     )
