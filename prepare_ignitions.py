@@ -158,6 +158,57 @@ def _normalise(df: pd.DataFrame, label: str) -> pd.DataFrame:
     return df
 
 
+def _product_of(label: str) -> str:
+    """FIRMS names files fire_<archive|nrt>_<PRODUCT>_<id>."""
+    parts = label.split("_")
+    return parts[2] if len(parts) > 2 else label
+
+
+def _drop_redundant_derived(frames, seen):
+    """Prefer FIRMS's own detections over any export derived elsewhere.
+
+    Section 7 of gee_export.js exists to close the gap between the FIRMS
+    archive and today. It turned out FIRMS already ships that period as an NRT
+    shapefile *inside the very same DL_FIRE_*.zip*, so loading both counted
+    every recent fire twice — 81% of the FIRMS NRT (day, 2 km cell) keys also
+    appeared in the GEE export. Measured against the archive's own May-Aug
+    profile that drove the median detections per event from 1 to 5 and median
+    cumulative FRP from 48 MW to 131 MW, and left 18% of events with no
+    footprint at all.
+
+    The derived rows are also the weaker record: a gridded daily composite
+    carrying no scan/track (so no pixel footprint) and no `type` field. So
+    where FIRMS covers a product at all, FIRMS wins and the derived export is
+    dropped outright — splicing it onto the tail would only move the seam.
+    """
+    derived = [(lbl, df) for lbl, df in frames
+               if df.get("version", pd.Series(dtype=object))
+                    .astype(str).str.upper().str.startswith("GEE").any()]
+    if not derived:
+        return frames, seen
+
+    native = {_product_of(lbl) for lbl, df in frames
+              if not any(lbl == d for d, _ in derived)}
+
+    keep, dropped = [], []
+    for lbl, df in frames:
+        if any(lbl == d for d, _ in derived) and _product_of(lbl) in native:
+            dropped.append((lbl, len(df)))
+        else:
+            keep.append((lbl, df))
+
+    for lbl, n in dropped:
+        print()
+        print(f"  !! dropped {lbl} ({n:,} detections):")
+        print(f"     FIRMS already supplies {_product_of(lbl)} for this period, and its")
+        print( "     rows carry the scan/track footprint and `type` screening")
+        print( "     that a derived export does not. Loading both would")
+        print( "     double-count every fire in the overlap.")
+    if dropped:
+        print()
+    return keep, [(l, n) for l, n in seen if l not in {d for d, _ in dropped}]
+
+
 def load_firms() -> pd.DataFrame:
     """Read every requested FIRMS file — zipped shapefile, .shp or .csv."""
     import geopandas as gpd
@@ -174,7 +225,7 @@ def load_firms() -> pd.DataFrame:
             for m in members:
                 g = gpd.read_file(f"zip://{z}!{m}")
                 label = Path(m).stem
-                frames.append(_normalise(pd.DataFrame(g), label))
+                frames.append((label, _normalise(pd.DataFrame(g), label)))
                 seen.append((label, len(g)))
 
         # b) loose shapefiles / CSVs
@@ -185,7 +236,7 @@ def load_firms() -> pd.DataFrame:
                     continue
                 obj = reader(f)
                 label = Path(f).stem
-                frames.append(_normalise(pd.DataFrame(obj), label))
+                frames.append((label, _normalise(pd.DataFrame(obj), label)))
                 seen.append((label, len(obj)))
 
     # Downloading the section-7 export and forgetting the flag would silently
@@ -235,7 +286,9 @@ def load_firms() -> pd.DataFrame:
               "     online, which creates an artificial upward trend in\n"
               "     ignition counts. Use a single product for trend analysis.\n")
 
-    out = pd.concat(frames, ignore_index=True)
+    frames, seen = _drop_redundant_derived(frames, seen)
+
+    out = pd.concat([df for _, df in frames], ignore_index=True)
     print(f"  total {'':45s} {len(out):>9,} detections")
     return out
 
@@ -370,11 +423,19 @@ def cluster_events(df: pd.DataFrame) -> pd.DataFrame:
 def derive_ignitions(df: pd.DataFrame) -> pd.DataFrame:
     """Earliest detection of each event, plus event-level attributes."""
     # Pixel footprint from the FIRMS along-scan / along-track dimensions.
+    nominal = pd.Series(
+        np.where(df["instrument"].str.upper().str.startswith("V"),
+                 0.375 ** 2, 1.0),
+        index=df.index,
+    )
     if {"scan", "track"} <= set(df.columns):
-        df["px_km2"] = df["scan"] * df["track"]
+        # Only some sources carry the real scan geometry. Concatenating one
+        # that does not leaves NaN here, and a NaN sum reports a footprint of
+        # exactly zero rather than failing — which is how 18% of the 2026
+        # events came to claim no area at all. Fall back per row, not per file.
+        df["px_km2"] = (df["scan"] * df["track"]).fillna(nominal)
     else:
-        df["px_km2"] = np.where(df["instrument"].str.upper().str.startswith("V"),
-                                0.375 ** 2, 1.0)
+        df["px_km2"] = nominal
 
     events = df.groupby("event_id", sort=False).agg(
         n_detections=("event_id", "size"),

@@ -326,12 +326,28 @@ Export.table.toDrive({
 });
 
 // ─────────────────────────────────────────────────────────────────────────
-// 7.  RECENT ACTIVE FIRE  —  fills the gap after the FIRMS archive ends
+// 7.  RECENT ACTIVE FIRE  —  SUPERSEDED, DO NOT RUN
 //
-//     The FIRMS archive download stops roughly three months behind real time
-//     (2026-04-30 in the current export), because that is how long the
-//     quality-controlled product takes to publish. MOD14A1 + MYD14A1 run to
-//     within a few days of today, so they close that gap.
+//     This section was written to close the gap after the FIRMS archive ends
+//     (2026-04-30 in the current export). That gap does not exist: the FIRMS
+//     download already ships the period as a SECOND shapefile inside the very
+//     same DL_FIRE_*.zip — fire_nrt_<product>_<id>.shp alongside
+//     fire_archive_<product>_<id>.shp. Unzip and look before exporting.
+//
+//     Running this anyway double-counts every recent fire. 81% of the FIRMS
+//     NRT (day, 2 km cell) keys also appeared in this export; against the
+//     archive's own May-Aug profile that pushed median detections per event
+//     from 1 to 5, median cumulative FRP from 48 MW to 131 MW, and left 18%
+//     of 2026 events with no footprint at all — enough to put a phantom
+//     162,683 MW event above the real 2021 Kabylie fire in a size ranking.
+//
+//     These rows are also the weaker record: a gridded daily composite with
+//     no scan/track (so no pixel footprint) and no `type` field for static-
+//     source screening. prepare_ignitions.py now drops any GEE-derived export
+//     for a product FIRMS already covers, so re-running this is inert rather
+//     than harmful — but it is still wasted quota.
+//
+//     Kept only for the case where FIRMS itself is unavailable.
 //
 //     Terra + Aqua is the same satellite pair behind MCD14ML, the archive
 //     product prepare_ignitions.py already reads, so extending with these two
