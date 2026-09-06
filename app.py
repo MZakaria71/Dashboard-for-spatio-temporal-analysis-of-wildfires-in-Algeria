@@ -585,6 +585,56 @@ def _view_from_bounds(bounds) -> Tuple[dict, float]:
     return dict(lat=(miny + maxy) / 2, lon=(minx + maxx) / 2), zoom
 
 
+# Four fifths of Algeria is Sahara and none of it burns, so a map framed on the
+# country spends most of itself on empty desert. Both records agree on where the
+# fire actually is: 99.9% of the burned area on file sits north of about 34°N,
+# and the independent FIRMS ignition record puts 22,090 of its 22,106 ignitions
+# there too, its southernmost detection anywhere being 32.4°N.
+#
+# This frames the view, it does not filter the data. Every Saharan commune is
+# still drawn and still hoverable, and zooming out reaches all of them — the
+# handful of oasis fires near Ghardaia included.
+FIRE_EXTENT_COVERAGE = 0.999
+# Vegetation fire only. "Other" cover is mostly bare ground, and counting its
+# burned area would drag the frame back into the desert it exists to leave out.
+EXTENT_BURN_COLS = ["burned_forest_km2", "burned_shrubland_km2",
+                    "burned_cropland_km2"]
+
+
+@st.cache_data(show_spinner=False)
+def fire_extent() -> Tuple[float, float, float, float]:
+    """Bounding box holding FIRE_EXTENT_COVERAGE of the burned area on record.
+
+    Derived rather than hardcoded to a latitude: communes are taken from the
+    south until the burned area left behind reaches 0.1% of the total, and the
+    box is what remains. If the record ever changes, so does the frame.
+    """
+    prov = load_provinces()
+    com = load_communes()
+    if not com:
+        return prov["total_bounds"]
+
+    _, b2, _, _, _ = load_data()
+    burned = (b2.assign(_s=b2[EXTENT_BURN_COLS].sum(axis=1))
+                .groupby("ADM2_CODE", observed=True)["_s"].sum())
+    total = float(burned.sum())
+    if total <= 0:
+        return prov["total_bounds"]
+
+    frame = pd.DataFrame(
+        [(float(burned.get(int(code), 0.0)), *box)
+         for code, box in com["bounds"].items()],
+        columns=["burned", "x0", "y0", "x1", "y1"],
+    )
+    frame = frame.assign(mid=(frame["y0"] + frame["y1"]) / 2).sort_values("mid")
+    keep = frame[frame["burned"].cumsum()
+                 >= total * (1.0 - FIRE_EXTENT_COVERAGE)]
+    if keep.empty:
+        return prov["total_bounds"]
+    return (float(keep["x0"].min()), float(keep["y0"].min()),
+            float(keep["x1"].max()), float(keep["y1"].max()))
+
+
 def _outline_coords(geom: dict) -> Tuple[List[Optional[float]], List[Optional[float]]]:
     """Exterior ring coordinates, with None separators between parts."""
     lons: List[Optional[float]] = []
@@ -827,7 +877,7 @@ def build_choropleth(
             hoverinfo="skip", showlegend=False,
         ))
     else:
-        center, zoom = _view_from_bounds(prov["total_bounds"])
+        center, zoom = _view_from_bounds(fire_extent())
 
     fig.update_layout(
         map=dict(center=center, zoom=zoom),
@@ -1745,7 +1795,7 @@ def render_ignition_section(
 
     df = filter_ignitions(ign, wilaya, commune_code, yr_min, yr_max)
     prov = load_provinces()
-    bounds = prov["bounds"].get(wilaya, prov["total_bounds"])
+    bounds = prov["bounds"].get(wilaya, fire_extent())
 
     n_ign = len(df)
     years_span = max(yr_max - yr_min + 1, 1)
@@ -2043,12 +2093,18 @@ def main() -> None:
                                  metric, level),
                 key=f"burn_map_{level}", **STRETCH,
             )
-            if level == "adm2" and selected_wilaya == ALL_WILAYAS:
-                st.caption(
-                    "🔍 1,541 communes at national zoom are a few pixels each "
-                    "— pick a wilaya in the sidebar to zoom in, or use the "
-                    "map's own zoom."
+            if selected_wilaya == ALL_WILAYAS:
+                note = (
+                    "🗺️ Framed on the fire belt — the band holding "
+                    f"{FIRE_EXTENT_COVERAGE:.1%} of the burned area on record. "
+                    "The Sahara is still drawn and still hoverable; zoom out "
+                    "to reach it."
                 )
+                if level == "adm2":
+                    note += (" 1,541 communes are a few pixels each even here "
+                             "— pick a wilaya in the sidebar for a readable "
+                             "view.")
+                st.caption(note)
             if metric == "rate":
                 st.caption(
                     f"Cumulative burned area divided by the "
