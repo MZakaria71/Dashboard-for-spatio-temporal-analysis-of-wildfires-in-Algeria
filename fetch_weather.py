@@ -88,6 +88,13 @@ FWD_WIND_KMH = 20.0
 # fires are" and the polygon's own representative point is used instead.
 MIN_IGNITIONS_FOR_CENTROID = 20
 
+# Fetching only the fire season cuts the request volume to about 42% of a
+# full year, which is what makes the remainder fit inside one daily budget.
+# It costs the out-of-season record — notably winter and spring rainfall, the
+# fuel-load signal — so every row records the months it was built from rather
+# than leaving a mixed layer to be discovered later.
+SEASON_MONTHS = (6, 10)          # June to October inclusive
+
 PAUSE_S = 2.0          # be a polite client of a free service
 MAX_RETRIES = 4
 RETRY_WAIT_S = 65      # the minutely limit clears in about a minute
@@ -151,6 +158,24 @@ def sampling_points(limit: int | None, fire_only: bool = True) -> pd.DataFrame:
     # Jijel and Medea: four of the six busiest, and the Kabylie fire with them.
     pts = pts.sort_values("n_ignitions", ascending=False).reset_index(drop=True)
     return pts.head(limit) if limit else pts
+
+
+def season_windows(start: date, end: date) -> list[tuple[date, date]]:
+    """Split a span into one June-October window per year.
+
+    Open-Meteo serves contiguous ranges only, so a season-limited fetch is one
+    request per year rather than one per wilaya. Each is small, and the total
+    volume is what the daily cap actually counts.
+    """
+    lo, hi = SEASON_MONTHS
+    out = []
+    for yr in range(start.year, end.year + 1):
+        a = max(date(yr, lo, 1), start)
+        last_day = 31 if hi in (1, 3, 5, 7, 8, 10, 12) else 30
+        b = min(date(yr, hi, last_day), end)
+        if a <= b:
+            out.append((a, b))
+    return out
 
 
 def fetch_daily(lat: float, lon: float, start: date, end: date) -> pd.DataFrame:
@@ -248,6 +273,10 @@ def main() -> None:
                    help="only the first N wilayas — for a trial run")
     p.add_argument("--refresh", action="store_true",
                    help="refetch every wilaya instead of resuming")
+    p.add_argument("--season-only", action="store_true",
+                   help=f"fetch only months {SEASON_MONTHS[0]}-"
+                        f"{SEASON_MONTHS[1]} — about 42%% of the volume, at "
+                        f"the cost of the out-of-season record")
     p.add_argument("--all-wilayas", action="store_true",
                    help="include wilayas with no recorded fires (they are "
                         "skipped by default — see sampling_points)")
@@ -290,8 +319,11 @@ def main() -> None:
             out[c] = out[c].astype("float32")
         for c in ("year", "month", "fire_weather_days", "n_days"):
             out[c] = out[c].astype("int16")
-        out["ADM1_NAME"] = out["ADM1_NAME"].astype("category")
-        out["sample_basis"] = out["sample_basis"].astype("category")
+        if "months_covered" not in out.columns:
+            out["months_covered"] = "1-12"
+        out["months_covered"] = out["months_covered"].fillna("1-12")
+        for c in ("ADM1_NAME", "sample_basis", "months_covered"):
+            out[c] = out[c].astype("category")
         OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
         out.to_parquet(OUTPUT_FILE, index=False)
         return out
@@ -300,7 +332,13 @@ def main() -> None:
     todo = [r for _, r in pts.iterrows() if str(r["ADM1_NAME"]) not in done]
     for i, row in enumerate(todo, 1):
         try:
-            daily = fetch_daily(float(row["lat"]), float(row["lon"]), start, end)
+            if args.season_only:
+                chunks = [fetch_daily(float(row["lat"]), float(row["lon"]), a, b)
+                          for a, b in season_windows(start, end)]
+                daily = pd.concat(chunks, ignore_index=True)
+            else:
+                daily = fetch_daily(float(row["lat"]), float(row["lon"]),
+                                    start, end)
         except RateLimited as exc:
             save()
             # Both caps arrive as a 429 and only the message tells them apart.
@@ -320,6 +358,10 @@ def main() -> None:
         m["sample_lat"] = float(row["lat"])
         m["sample_lon"] = float(row["lon"])
         m["sample_basis"] = str(row["basis"])
+        # Which months this row was built from. Without it a layer assembled
+        # over several runs silently mixes full-year and season-only wilayas,
+        # and any future annual statistic would be quietly wrong for some.
+        m["months_covered"] = ("%d-%d" % SEASON_MONTHS) if args.season_only             else "1-12"
         frames.append(m)
         print(f"  [{len(done) + i:>2}/{len(pts)}] {row['ADM1_NAME']:<20} "
               f"{len(daily):,} days -> {len(m)} months", flush=True)
