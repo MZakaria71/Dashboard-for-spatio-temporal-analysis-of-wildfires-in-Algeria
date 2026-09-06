@@ -37,3 +37,6 @@ data/gaul_adm2.geojson
 *_24h.csv
 *_48h.csv
 *_7d.csv
+
+# Claude Code local tooling (launch config for the preview pane)
+.claude/

@@ -35,6 +35,43 @@ st.set_page_config(
     initial_sidebar_state="auto",
 )
 
+# ── Chrome ────────────────────────────────────────────────────────────────────
+# The section switch is this dashboard's primary navigation, but Streamlit sizes
+# a radio the same as any other one — 16 px text and a 16 px mark — so it reads
+# as a form field rather than as the control you steer with. Scoped to that one
+# widget's own key so the filter radios keep the default size.
+st.markdown(
+    """
+    <style>
+    .st-key-main_view div[role="radiogroup"] {
+        flex-wrap: wrap;
+        gap: 0.5rem 1.25rem;
+    }
+    /* Streamlit spaces the options with a margin on each label. Left in place
+       it stacks on top of the gap above and pushes the five sections onto two
+       rows on a laptop, so spacing is handed to the gap alone. */
+    .st-key-main_view label[data-baseweb="radio"] {
+        margin-right: 0;
+    }
+    .st-key-main_view label[data-baseweb="radio"] p {
+        font-size: 1.15rem;
+        font-weight: 600;
+    }
+    /* The mark is BaseWeb's and sized in px, so it has to be scaled by hand
+       or it stays a dot next to grown text. */
+    .st-key-main_view label[data-baseweb="radio"] > div:first-of-type {
+        height: 1.25rem;
+        width: 1.25rem;
+    }
+    .st-key-main_view label[data-baseweb="radio"] > div:first-of-type > div {
+        height: 0.5rem;
+        width: 0.5rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 DATA_DIR = Path("data")
 IGNITION_FILE = DATA_DIR / "ignitions.parquet"

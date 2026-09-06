@@ -1,7 +1,9 @@
 # Dashboard runtime only. The offline data-prep scripts (prepare_dataset.py,
 # prepare_ignitions.py) additionally need geopandas, shapely and scipy —
 # install those separately, they are not needed to serve the app.
-streamlit>=1.35,<2          # 1.35 added st.plotly_chart(on_select=...)
+streamlit>=1.39,<2          # 1.35 added st.plotly_chart(on_select=...);
+                            # 1.39 added the st-key-<key> CSS class the
+                            # section switch is sized through
 plotly>=5.24,<8
 pandas>=2.0,<3
 pyarrow>=14.0,<22
