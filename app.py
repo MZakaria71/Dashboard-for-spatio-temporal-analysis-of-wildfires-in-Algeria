@@ -37,33 +37,48 @@ st.set_page_config(
 
 # ── Chrome ────────────────────────────────────────────────────────────────────
 # The section switch is this dashboard's primary navigation, but Streamlit sizes
-# a radio the same as any other one — 16 px text and a 16 px mark — so it reads
-# as a form field rather than as the control you steer with. Scoped to that one
-# widget's own key so the filter radios keep the default size.
+# a radio like any other one — 14 px text and a 16 px mark — so it read as one
+# more filter. Scaled through the widget's own st-key-main_view class, so the
+# sidebar filters and the in-section metric radios keep the default size.
+#
+# Two selectors per rule because Streamlit changed the radio's internals: it
+# used to render BaseWeb (label[data-baseweb="radio"], mark as the label's first
+# div) and now renders React Aria (label[data-testid="stRadioOption"], mark
+# nested two divs deeper). Cloud runs the new one and the pinned local version
+# the old one, so both are matched; whichever is absent simply never applies.
+#
+# Sizes are in rem, not multiples of the inherited size, because the two
+# versions disagree on the default (16 px then, 14 px now) and the switch should
+# not silently shrink under us again. They are also the largest that keep all
+# five sections on one row inside Streamlit's 810 px content column with the
+# sidebar open; past that it wraps 4+1, which reads as a mistake.
 st.markdown(
     """
     <style>
     .st-key-main_view div[role="radiogroup"] {
         flex-wrap: wrap;
-        gap: 0.5rem 1.25rem;
+        gap: 0.5rem 0.85rem;
     }
-    /* Streamlit spaces the options with a margin on each label. Left in place
-       it stacks on top of the gap above and pushes the five sections onto two
-       rows on a laptop, so spacing is handed to the gap alone. */
-    .st-key-main_view label[data-baseweb="radio"] {
+    /* The BaseWeb version spaces options with a margin on each label, which
+       stacks on top of the gap above; spacing is handed to the gap alone. */
+    .st-key-main_view label[data-baseweb="radio"],
+    .st-key-main_view [data-testid="stRadioOption"] {
         margin-right: 0;
     }
-    .st-key-main_view label[data-baseweb="radio"] p {
-        font-size: 1.15rem;
+    .st-key-main_view label[data-baseweb="radio"] p,
+    .st-key-main_view [data-testid="stRadioOption"] p {
+        font-size: 1.125rem;
         font-weight: 600;
     }
-    /* The mark is BaseWeb's and sized in px, so it has to be scaled by hand
-       or it stays a dot next to grown text. */
-    .st-key-main_view label[data-baseweb="radio"] > div:first-of-type {
+    /* The mark is the widget library's and sized in px, so it has to be scaled
+       by hand or it stays a dot next to grown text. */
+    .st-key-main_view label[data-baseweb="radio"] > div:first-of-type,
+    .st-key-main_view [data-testid="stRadioOption"] > div > div > div:first-child {
         height: 1.25rem;
         width: 1.25rem;
     }
-    .st-key-main_view label[data-baseweb="radio"] > div:first-of-type > div {
+    .st-key-main_view label[data-baseweb="radio"] > div:first-of-type > div,
+    .st-key-main_view [data-testid="stRadioOption"] > div > div > div:first-child > div {
         height: 0.5rem;
         width: 0.5rem;
     }
@@ -88,6 +103,10 @@ FIRE_SEASON = (6, 7, 8, 9)
 # unlike the old Dz_adm1.shp, which used the post-2019 58-wilaya scheme and left
 # ten wilayas permanently unmatched.
 PROVINCE_FILE = DATA_DIR / "gaul_adm1.geojson"
+# The 1,541 GAUL communes, run through simplify_boundaries.py: the raw export is
+# 8 MB and gitignored, and Plotly hands the whole FeatureCollection to the
+# browser on every render.
+COMMUNE_FILE = DATA_DIR / "gaul_adm2_simple.geojson"
 
 BURN_COLS   = ["burned_forest_km2", "burned_shrubland_km2",
                "burned_cropland_km2", "burned_other_km2", "burned_total_km2"]
@@ -243,6 +262,46 @@ def load_provinces() -> dict:
         "bounds": bounds,
         "total_bounds": _merge_bounds(list(bounds.values())),
         "geoms": {f["properties"]["ADM1_NAME"]: f["geometry"] for f in features},
+    }
+@st.cache_data(show_spinner=False)
+def load_communes() -> dict:
+    """Commune boundaries, in the same shape load_provinces returns.
+
+    Keyed on ADM2_CODE rather than name: 40 names are used by more than one
+    commune (45 communes in all, since some names are used three times), so a
+    name-keyed map would colour Ain Zitoun in Batna with Ain Zitoun in Souk
+    Ahras's fires. Codes are strings because Plotly matches
+    `locations` against `featureidkey` values literally, and an int on one side
+    with a str on the other silently draws nothing.
+    """
+    if not COMMUNE_FILE.exists():
+        return {}
+
+    with open(COMMUNE_FILE, encoding="utf-8") as f:
+        raw = json.load(f)
+
+    features, bounds, labels = [], {}, {}
+    for feat in raw["features"]:
+        geom = _polygonal(feat["geometry"])
+        if geom is None:
+            continue
+        props = feat["properties"]
+        code = str(props["ADM2_CODE"])
+        features.append({
+            "type": "Feature",
+            "id": code,
+            "properties": {"ADM2_CODE": code},
+            "geometry": geom,
+        })
+        labels[code] = f"{props['ADM2_NAME']}, {props['ADM1_NAME']}"
+        bounds[code] = _coords_bounds(geom)
+
+    return {
+        "geojson": {"type": "FeatureCollection", "features": features},
+        "keys": [f["properties"]["ADM2_CODE"] for f in features],
+        "labels": labels,
+        "bounds": bounds,
+        "total_bounds": _merge_bounds(list(bounds.values())),
     }
 
 
@@ -543,11 +602,6 @@ def _outline_coords(geom: dict) -> Tuple[List[Optional[float]], List[Optional[fl
     return lons, lats
 
 
-# A wilaya holding only a few km² of the selected cover types yields a
-# meaningless rate — one fire divided by almost nothing puts it at the top of
-# the map. Below this it is shown as no data instead.
-MIN_BURNABLE_KM2 = 50.0
-
 MAP_METRICS = {
     "Share of burnable land": "rate",
     "Total burned area": "total",
@@ -556,42 +610,66 @@ MAP_METRICS = {
 
 METRIC_META = {
     "total": dict(
-        bar="km²", fmt=":,.1f", title="Burned Area by Wilaya",
+        bar="km²", fmt=":,.1f", title="Burned Area by {level}",
         label="Burned area (km²)",
     ),
     "rate": dict(
-        bar="%/yr", fmt=":.2f", title="Annual Burn Rate by Wilaya",
+        bar="%/yr", fmt=":.2f", title="Annual Burn Rate by {level}",
         label="% of burnable land per year",
     ),
     "recurrence": dict(
-        bar="years", fmt=":.0f", title="Years with Fire by Wilaya",
+        bar="years", fmt=":.0f", title="Years with Fire by {level}",
         label="Years with any fire",
     ),
 }
 
+# The two admin levels the burned-area tables carry. Everything that differs
+# between a wilaya map and a commune map lives here.
+#
+# `floor` is the burnable area below which a rate is suppressed: one fire
+# divided by almost nothing puts a place at the top of the map, so it is drawn
+# as no data instead. The two numbers are not the same because the units are
+# not. Wilayas hold a median 3,540 km² of forest, shrubland and cropland and
+# the smallest holds 61, so 50 km² never actually excludes one — it is a guard.
+# Communes hold a median 87 km², and 50 there would blank 28% of them and hide
+# 7.9% of all burned area. At 10 km² it blanks 10% and hides 0.03%, which is
+# the artefact without the amputation.
+ADM1_LEVEL, ADM2_LEVEL = "Wilaya", "Commune"
+MAP_LEVELS = {ADM1_LEVEL: "adm1", ADM2_LEVEL: "adm2"}
+LEVELS = {
+    "adm1": dict(name=ADM1_LEVEL, key="ADM1_NAME", floor=50.0),
+    "adm2": dict(name=ADM2_LEVEL, key="ADM2_CODE", floor=10.0),
+}
+
 
 @st.cache_data(show_spinner=False)
-def wilaya_metric(
+def admin_metric(
     yr_min: int, yr_max: int, categories: Tuple[str, ...], metric: str,
+    level: str = "adm1",
 ) -> pd.DataFrame:
-    """One value per wilaya for the chosen map metric.
+    """One value per wilaya or commune for the chosen map metric.
 
-    `total` ranks wilayas largely by their size — Tlemcen and Sidi Bel Abbes
-    sit in its top ten at ~12% of their burnable land, while Blida is tenth on
-    area and first once normalised. `rate` divides by the land that could
-    actually burn, so it measures fire regime rather than geography.
+    `total` ranks places largely by their size — Tlemcen and Sidi Bel Abbes sit
+    in its top ten at ~12% of their burnable land, while Blida is tenth on area
+    and first once normalised. `rate` divides by the land that could actually
+    burn, so it measures fire regime rather than geography.
+
+    Returns the level's key column (ADM1_NAME or ADM2_CODE) and `value`.
     """
+    spec = LEVELS[level]
+    key = spec["key"]
     burn_cols = selected_burn_cols(categories)
     if not burn_cols:
-        return pd.DataFrame(columns=["ADM1_NAME", "value"])
+        return pd.DataFrame(columns=[key, "value"])
 
-    b1, _, lc1, _, _ = load_data()
-    window = b1[(b1["year"] >= yr_min) & (b1["year"] <= yr_max)].copy()
+    b1, b2, lc1, lc2, _ = load_data()
+    burn, land = (b1, lc1) if level == "adm1" else (b2, lc2)
+    window = burn[(burn["year"] >= yr_min) & (burn["year"] <= yr_max)].copy()
     window["_sel"] = window[burn_cols].sum(axis=1)
 
     if metric == "recurrence":
-        yearly = window.groupby(["ADM1_NAME", "year"], observed=True)["_sel"].sum()
-        val = (yearly > 0).groupby("ADM1_NAME", observed=True).sum()
+        yearly = window.groupby([key, "year"], observed=True)["_sel"].sum()
+        val = (yearly > 0).groupby(key, observed=True).sum()
         return val.rename("value").reset_index()
 
     if metric == "rate":
@@ -603,32 +681,32 @@ def wilaya_metric(
             window = window[window["year"] != partial[0]]
         n_years = int(window["year"].nunique())
         if not n_years:
-            return pd.DataFrame(columns=["ADM1_NAME", "value"])
+            return pd.DataFrame(columns=[key, "value"])
 
         lc_cols = [c for c in LC_TYPE_COLS if LC_LABELS[c] in categories]
-        lcw = lc1[(lc1["year"] >= yr_min) & (lc1["year"] <= yr_max)]
+        lcw = land[(land["year"] >= yr_min) & (land["year"] <= yr_max)]
         if lcw.empty or not lc_cols:
-            return pd.DataFrame(columns=["ADM1_NAME", "value"])
+            return pd.DataFrame(columns=[key, "value"])
 
-        burned = window.groupby("ADM1_NAME", observed=True)["_sel"].sum()
+        burned = window.groupby(key, observed=True)["_sel"].sum()
         burnable = (lcw.assign(_b=lcw[lc_cols].sum(axis=1))
-                       .groupby("ADM1_NAME", observed=True)["_b"].mean())
+                       .groupby(key, observed=True)["_b"].mean())
         out = pd.concat([burned.rename("burned"),
                          burnable.rename("burnable")], axis=1).dropna()
-        out = out[out["burnable"] >= MIN_BURNABLE_KM2]
+        out = out[out["burnable"] >= spec["floor"]]
         out["value"] = 100.0 * out["burned"] / (out["burnable"] * n_years)
-        return out.reset_index()[["ADM1_NAME", "value"]]
+        return out.reset_index()[[key, "value"]]
 
-    total = window.groupby("ADM1_NAME", observed=True)["_sel"].sum()
+    total = window.groupby(key, observed=True)["_sel"].sum()
     return total.rename("value").reset_index()
 
 
 @st.cache_data(show_spinner=False)
 def build_choropleth(
     yr_min: int, yr_max: int, wilaya: str, categories: Tuple[str, ...],
-    metric: str = "rate",
+    metric: str = "rate", level: str = "adm1",
 ) -> go.Figure:
-    """Choropleth of the chosen metric per wilaya for the current selection.
+    """Choropleth of the chosen metric, by wilaya or by commune.
 
     Cached on its scalar arguments: the geometry is re-serialised only when the
     selection actually changes, not on every widget interaction.
@@ -639,16 +717,30 @@ def build_choropleth(
 
     b1, _, _, _, _ = load_data()
     prov = load_provinces()
+    spec = LEVELS[level]
+    key = spec["key"]
     meta = METRIC_META[metric]
 
-    totals = wilaya_metric(yr_min, yr_max, categories, metric)
-    if not totals.empty:
-        totals["ADM1_NAME"] = totals["ADM1_NAME"].astype(str)
+    shapes = prov if level == "adm1" else load_communes()
+    if not shapes:
+        return _empty_fig(
+            "Commune boundaries not built<br>"
+            "<sub>Run simplify_boundaries.py to create "
+            f"{COMMUNE_FILE.name}</sub>"
+        )
+    ids = shapes["names"] if level == "adm1" else shapes["keys"]
 
-    frame = pd.DataFrame({"ADM1_NAME": prov["names"]}).merge(
-        totals, on="ADM1_NAME", how="left"
-    ) if not totals.empty else pd.DataFrame(
-        {"ADM1_NAME": prov["names"], "value": float("nan")})
+    totals = admin_metric(yr_min, yr_max, categories, metric, level)
+    if not totals.empty:
+        totals[key] = totals[key].astype(str)
+
+    frame = pd.DataFrame({key: ids}).merge(
+        totals, on=key, how="left"
+    ) if not totals.empty else pd.DataFrame({key: ids, "value": float("nan")})
+    # What the hover shows. At commune level the name alone is ambiguous — 45
+    # of them are shared — so the wilaya rides along.
+    frame["label"] = (frame[key] if level == "adm1"
+                      else frame[key].map(shapes["labels"]).fillna(frame[key]))
     known = frame[frame["value"].notna()]
     unknown = frame[frame["value"].isna()]
 
@@ -665,35 +757,49 @@ def build_choropleth(
 
     fig = px.choropleth_map(
         known,
-        geojson=prov["geojson"],
-        locations="ADM1_NAME",
-        featureidkey="properties.ADM1_NAME",
+        geojson=shapes["geojson"],
+        locations=key,
+        featureidkey=f"properties.{key}",
         color="value",
-        hover_name="ADM1_NAME",
-        hover_data={"value": meta["fmt"]},
+        hover_name="label",
+        hover_data={"value": meta["fmt"], key: False, "label": False},
         map_style="carto-positron",
         opacity=0.75,
         color_continuous_scale="YlOrRd",
         labels={"value": meta["label"]},
-        title=f"{meta['title']} ({yr_min}–{yr_max})",
+        title=f"{meta['title'].format(level=spec['name'])} ({yr_min}–{yr_max})",
     )
 
-    # Boundaries and data now come from the same GAUL 2015 release, so this is
-    # normally empty. Kept as a guard against a future boundary/data mismatch.
+    # At wilaya level boundaries and data come from the same GAUL 2015 release,
+    # so this is normally empty. At commune level it is where the places whose
+    # burnable land is under the floor go.
+    #
+    # This trace gets only the features it draws, not the whole collection.
+    # Plotly serialises `geojson` once per trace, so handing both traces all
+    # 1,541 communes sent the commune map's geometry twice — 4.36 MB where
+    # 2.28 MB says the same thing.
     if not unknown.empty:
+        wanted = set(unknown[key])
         fig.add_trace(go.Choroplethmap(
-            geojson=prov["geojson"],
-            locations=unknown["ADM1_NAME"],
-            featureidkey="properties.ADM1_NAME",
+            geojson={
+                "type": "FeatureCollection",
+                "features": [f for f in shapes["geojson"]["features"]
+                             if f["properties"][key] in wanted],
+            },
+            locations=unknown[key],
+            featureidkey=f"properties.{key}",
             z=[0] * len(unknown),
+            text=unknown["label"],
             colorscale=[[0, NODATA_FILL], [1, NODATA_FILL]],
             showscale=False,
             marker=dict(opacity=0.6, line=dict(width=0.5, color=NODATA_LINE)),
-            hovertemplate="<b>%{location}</b><br>No data<extra></extra>",
+            hovertemplate="<b>%{text}</b><br>No data<extra></extra>",
             name="No data",
         ))
 
     # Frame the selected wilaya and outline it, so the map tracks the sidebar.
+    # Communes are far too small to read at national zoom, so this matters more
+    # at ADM2 than at ADM1.
     if wilaya in prov["bounds"]:
         center, zoom = _view_from_bounds(prov["bounds"][wilaya])
         lons, lats = _outline_coords(prov["geoms"][wilaya])
@@ -1887,30 +1993,52 @@ def main() -> None:
         col_map, col_bar = st.columns([1.3, 1])
 
         with col_map:
-            st.subheader("🗺️ Wilaya Fire Map")
+            # The heading names the level, so it has to know it before the radio
+            # is drawn. On a rerun the key already holds the new value; on the
+            # first run it is absent and the default matches the radio's own.
+            st.subheader(
+                f"🗺️ {st.session_state.get('burn_level', ADM1_LEVEL)} Fire Map")
+            level_label = st.radio(
+                "Map level", list(MAP_LEVELS), horizontal=True,
+                key="burn_level", label_visibility="collapsed",
+                help="The same burned-area record at two resolutions. "
+                     "**Wilaya** is the 48-unit administrative view. "
+                     "**Commune** breaks it into 1,541 units, which is where "
+                     "a fire regime is actually legible — a wilaya average "
+                     "hides the handful of communes doing most of the burning.",
+            )
+            level = MAP_LEVELS[level_label]
             metric_label = st.radio(
                 "Map metric", list(MAP_METRICS), horizontal=True,
                 key="burn_metric", label_visibility="collapsed",
-                help="**Share of burnable land** divides by the forest, "
-                     "shrubland and cropland each wilaya actually holds, so it "
-                     "measures fire regime rather than size. **Total burned "
-                     "area** is the raw km² — useful, but it ranks wilayas "
-                     "largely by how big they are. **Years with fire** counts "
-                     "how often a wilaya burns at all.",
+                help=f"**Share of burnable land** divides by the forest, "
+                     f"shrubland and cropland each {level_label.lower()} "
+                     f"actually holds, so it measures fire regime rather than "
+                     f"size. **Total burned area** is the raw km² — useful, "
+                     f"but it ranks places largely by how big they are. "
+                     f"**Years with fire** counts how often somewhere burns "
+                     f"at all.",
             )
             metric = MAP_METRICS[metric_label]
             st.plotly_chart(
                 build_choropleth(yr_min, yr_max, selected_wilaya, cat_key,
-                                 metric),
-                key="burn_map", **STRETCH,
+                                 metric, level),
+                key=f"burn_map_{level}", **STRETCH,
             )
+            if level == "adm2" and selected_wilaya == ALL_WILAYAS:
+                st.caption(
+                    "🔍 1,541 communes at national zoom are a few pixels each "
+                    "— pick a wilaya in the sidebar to zoom in, or use the "
+                    "map's own zoom."
+                )
             if metric == "rate":
                 st.caption(
-                    "Cumulative burned area divided by the wilaya's own "
-                    f"burnable land, per year. Wilayas with under "
-                    f"{MIN_BURNABLE_KM2:.0f} km² of the selected cover types "
-                    "are shown as no data — the ratio is meaningless there. "
-                    "An incomplete final year is excluded from both sides."
+                    f"Cumulative burned area divided by the "
+                    f"{level_label.lower()}'s own burnable land, per year. "
+                    f"Places with under {LEVELS[level]['floor']:.0f} km² of "
+                    f"the selected cover types are shown as no data — the "
+                    f"ratio is meaningless there. An incomplete final year is "
+                    f"excluded from both sides."
                 )
             elif metric == "total":
                 st.caption(
