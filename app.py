@@ -770,6 +770,22 @@ def build_choropleth(
         title=f"{meta['title'].format(level=spec['name'])} ({yr_min}–{yr_max})",
     )
 
+    # 48 wilaya outlines are structure; 1,541 commune outlines are noise. At
+    # national zoom the default border is wider than the northern communes it
+    # encloses, so the Tell — the part with all the fire in it — renders as a
+    # black smudge instead of a heat map.
+    #
+    # The right width depends on the zoom, and MapLibre will not interpolate one
+    # for a Plotly trace. But the zoom is not free-floating: the map frames the
+    # sidebar's wilaya, so the selection says which of the two cases this is.
+    commune_line = 0.15 if wilaya == ALL_WILAYAS else 0.6
+    if level == "adm2":
+        fig.update_traces(
+            marker_line_width=commune_line,
+            marker_line_color="rgba(90,90,90,0.45)",
+            selector=dict(type="choroplethmap"),
+        )
+
     # At wilaya level boundaries and data come from the same GAUL 2015 release,
     # so this is normally empty. At commune level it is where the places whose
     # burnable land is under the floor go.
@@ -792,7 +808,9 @@ def build_choropleth(
             text=unknown["label"],
             colorscale=[[0, NODATA_FILL], [1, NODATA_FILL]],
             showscale=False,
-            marker=dict(opacity=0.6, line=dict(width=0.5, color=NODATA_LINE)),
+            marker=dict(opacity=0.6,
+                        line=dict(width=0.5 if level == "adm1" else commune_line,
+                                  color=NODATA_LINE)),
             hovertemplate="<b>%{text}</b><br>No data<extra></extra>",
             name="No data",
         ))
