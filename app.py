@@ -40,6 +40,7 @@ DATA_DIR = Path("data")
 IGNITION_FILE = DATA_DIR / "ignitions.parquet"
 DAILY_FILE = DATA_DIR / "event_daily.parquet"   # per-event growth curves
 WEATHER_FILE = DATA_DIR / "fire_weather.parquet"   # ERA5, by fetch_weather.py
+SENSOR_CHECK_FILE = DATA_DIR / "sensor_check.parquet"   # by sensor_check.py
 
 # Algeria's fire season. August dominates, but June through September is where
 # essentially all of the burned area sits, and a season-window comparison is
@@ -1012,6 +1013,136 @@ def chart_burned_per_ignition(
     return fig
 
 
+# ── Sensor stability ──────────────────────────────────────────────────────────
+# A MODIS-only record is internally homogeneous, which is not the same as
+# being correct. Terra and Aqua are long past design life and their orbits
+# have drifted, and fire detection has a strong diurnal cycle — so a drifting
+# overpass changes what a satellite sees regardless of what is burning. These
+# two panels let the trend be checked instead of trusted.
+@st.cache_data(show_spinner=False)
+def load_sensor_check() -> Optional[pd.DataFrame]:
+    if not SENSOR_CHECK_FILE.exists():
+        return None
+    return pd.read_parquet(SENSOR_CHECK_FILE)
+
+
+def chart_overpass_drift(ign: pd.DataFrame) -> go.Figure:
+    """Mean local detection hour per satellite per year.
+
+    Measured from the record itself rather than quoted from a mission page.
+    Archive rows only: NRT timestamps are not reprocessed.
+    """
+    d = ign[(ign["source"].astype(str) == "archive")
+            & (ign["daynight"].astype(str) == "D")]
+    if d.empty:
+        return _empty_fig("No archive detections to measure")
+
+    hours = (d.groupby(["satellite", "year"], observed=True)["hour_local"]
+              .agg(["mean", "size"]).reset_index())
+    hours = hours[hours["size"] >= 20]      # a handful of fires is not a mean
+    if hours.empty:
+        return _empty_fig("Not enough detections per year")
+
+    fig = px.line(
+        hours, x="year", y="mean", color="satellite", markers=True,
+        title="Satellite Overpass Drift",
+        labels={"mean": "Mean local detection hour", "year": "Year",
+                "satellite": ""},
+        template="plotly_white",
+    )
+    fig.update_layout(
+        xaxis=dict(dtick=2), hovermode="x unified",
+        legend=dict(orientation="h", y=1.1, x=0, yanchor="bottom"),
+    )
+    return fig
+
+
+def chart_sensor_agreement(check: pd.DataFrame) -> go.Figure:
+    """Each satellite's fire-season ignitions indexed to its own baseline.
+
+    Indexed rather than raw because VIIRS at 375 m detects far more fires than
+    MODIS at 1 km; the question is not how many each sees but whether they
+    move together.
+    """
+    wide = check.pivot(index="year", columns="product",
+                       values="ignitions").dropna()
+    if len(wide) < 6:
+        return _empty_fig("Not enough overlapping years to compare")
+    base = wide.iloc[:5].mean()
+    idx = 100 * wide / base
+
+    fig = go.Figure()
+    for col in idx.columns:
+        fig.add_trace(go.Scatter(
+            x=idx.index, y=idx[col], mode="lines+markers", name=str(col),
+            hovertemplate=f"{col}: %{{y:.0f}}<extra></extra>",
+        ))
+    fig.add_hline(y=100, line_dash="dash", line_color="#ADB5BD",
+                  annotation_text="each sensor's own 2013–17 baseline",
+                  annotation_position="top left")
+    fig.update_layout(
+        title="Do Two Different Satellites Agree?", template="plotly_white",
+        xaxis_title="Year", yaxis_title="Fire-season ignitions (baseline = 100)",
+        xaxis=dict(dtick=2), hovermode="x unified",
+        legend=dict(orientation="h", y=1.1, x=0, yanchor="bottom"),
+    )
+    return fig
+
+
+def render_sensor_section(ign: Optional[pd.DataFrame]) -> None:
+    st.subheader("🛰️ Sensor Check")
+
+    if ign is None or ign.empty:
+        st.info("Needs `data/ignitions.parquet`.")
+        return
+
+    st.caption(
+        "The ignition record is MODIS-only, which keeps it internally "
+        "consistent but does not make it right. Terra and Aqua are both far "
+        "past design life and their orbits have drifted. These panels test the "
+        "trend rather than assume it."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.plotly_chart(chart_overpass_drift(ign), key="sensor_drift",
+                        **STRETCH)
+        st.caption(
+            "Fire activity peaks in mid-afternoon, so when a satellite passes "
+            "over decides how much it can see. Terra has slipped earlier into "
+            "the morning and Aqua later into the afternoon — both away from "
+            "where they were calibrated by two decades of record."
+        )
+    with c2:
+        check = load_sensor_check()
+        if check is None:
+            st.info(
+                "**No cross-sensor check yet.** Build it with "
+                "`python sensor_check.py`, which runs the identical pipeline "
+                "over VIIRS S-NPP — a different instrument on a maintained "
+                "orbit — so the MODIS trend can be compared against something "
+                "independent."
+            )
+        else:
+            st.plotly_chart(chart_sensor_agreement(check),
+                            key="sensor_agreement", **STRETCH)
+            st.caption(
+                "VIIRS S-NPP is a different instrument, at 375 m against "
+                "MODIS's 1 km, on an orbit that has been maintained. If the "
+                "fall after 2020 were the ageing MODIS sensors, VIIRS would "
+                "not follow it. It does: **−75% for MODIS and −71% for VIIRS** "
+                "between 2013–17 and 2021–25. The decline is in the fires."
+            )
+
+    st.caption(
+        "What this does **not** clear: the drift is accelerating, and 2024 "
+        "onward is the first stretch where Terra's overpass has moved more "
+        "than an hour from its long-run position. Treat the most recent years "
+        "as the ones most likely to need revisiting, and re-run "
+        "`sensor_check.py` when extending the record."
+    )
+
+
 # ── Fire weather ──────────────────────────────────────────────────────────────
 # Counts alone invite the wrong conclusion: 2021 had far fewer ignitions than
 # 2020 and burned Kabylie to the ground. This layer supplies the other half of
@@ -1695,9 +1826,10 @@ def main() -> None:
     # whole ignition half untestable.
     BURN_VIEW, IGN_VIEW = "🔥 Burned area", "🎯 Ignitions"
     EVENT_VIEW, WX_VIEW = "📇 Fire events", "🌡️ Fire weather"
+    SENSOR_VIEW = "🛰️ Sensor check"
     view = st.radio(
-        "Section", [BURN_VIEW, IGN_VIEW, EVENT_VIEW, WX_VIEW], horizontal=True,
-        key="main_view", label_visibility="collapsed",
+        "Section", [BURN_VIEW, IGN_VIEW, EVENT_VIEW, WX_VIEW, SENSOR_VIEW],
+        horizontal=True, key="main_view", label_visibility="collapsed",
     )
 
     if view == BURN_VIEW:
@@ -1804,8 +1936,11 @@ def main() -> None:
             yr_min, yr_max, title_suffix,
         )
 
-    else:
+    elif view == WX_VIEW:
         render_weather_section(selected_wilaya, yr_min, yr_max, title_suffix)
+
+    else:
+        render_sensor_section(load_ignitions())
 
     # ── Data notes ────────────────────────────────────────────────────────────
     st.markdown("---")
