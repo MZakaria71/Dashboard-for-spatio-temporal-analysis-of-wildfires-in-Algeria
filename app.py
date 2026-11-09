@@ -50,14 +50,15 @@ st.set_page_config(
 # Sizes are in rem, not multiples of the inherited size, because the two
 # versions disagree on the default (16 px then, 14 px now) and the switch should
 # not silently shrink under us again. They are also the largest that keep all
-# five sections on one row inside Streamlit's 810 px content column with the
-# sidebar open; past that it wraps 4+1, which reads as a mistake.
+# six sections on one row inside Streamlit's 820 px content column with the
+# sidebar open (about 12 px to spare at 1rem text and a 0.5rem gap); past that
+# it wraps 5+1, which reads as a mistake.
 st.markdown(
     """
     <style>
     .st-key-main_view div[role="radiogroup"] {
         flex-wrap: wrap;
-        gap: 0.5rem 0.85rem;
+        gap: 0.5rem 0.5rem;
     }
     /* The BaseWeb version spaces options with a margin on each label, which
        stacks on top of the gap above; spacing is handed to the gap alone. */
@@ -67,7 +68,7 @@ st.markdown(
     }
     .st-key-main_view label[data-baseweb="radio"] p,
     .st-key-main_view [data-testid="stRadioOption"] p {
-        font-size: 1.125rem;
+        font-size: 1rem;
         font-weight: 600;
     }
     /* The mark is the widget library's and sized in px, so it has to be scaled
@@ -1762,6 +1763,18 @@ def render_event_catalogue(
             if str(picked["source"]) == "nrt":
                 st.caption("⚠️ Near-real-time: never screened for static "
                            "industrial sources, and not reprocessed.")
+            geo = load_geo()
+            if geo is not None:
+                gev = geo["events"]
+                same = (gev["firms_ignition_id"] == int(picked["ignition_id"])
+                        ).fillna(False).astype(bool)
+                if same.any():
+                    g = gev[same].iloc[0]
+                    st.caption(
+                        f"⏱️ Meteosat ({g['platform']}) followed this fire "
+                        f"every {int(g['slot_min'])} min from "
+                        f"{g['start_local']:%d %b %H:%M} local: replay it "
+                        f"under **Fire spread**.")
 
     st.caption(
         "**Detected extent counts distinct 1 km ground cells**, so a patch "
@@ -1906,6 +1919,477 @@ def render_ignition_section(
     )
 
 
+# ── Fire spread (geostationary) ───────────────────────────────────────────────
+# MODIS and VIIRS pass over the fire belt four or so times a day, so FIRMS can
+# say where a fire was at each overpass but not how it got there. Meteosat sits
+# over 0° and images Algeria every 10 minutes (MTG-I) or 15 (MSG), which is
+# what it takes to follow a front. Built by fetch_geostationary.py (LSA SAF
+# FRP-PIXEL products) and prepare_spread.py.
+GEO_EVENT_FILE = DATA_DIR / "geo_events.parquet"
+GEO_SLOT_FILE = DATA_DIR / "geo_event_slots.parquet"
+GEO_CELL_FILE = DATA_DIR / "geo_event_cells.parquet"
+GEO_DET_FILE = DATA_DIR / "geo_event_detections.parquet"
+
+# Algeria is UTC+1 all year. The geostationary tables are in UTC, like the
+# products they come from; everything shown is converted at the last moment.
+LOCAL_OFFSET = pd.Timedelta(hours=1)
+
+PLATFORM_LABELS = {
+    "MTG": "MTG-I · FCI · every 10 min",
+    "MSG": "MSG · SEVIRI · every 15 min",
+}
+
+SPREAD_RANKS = {
+    "Footprint":        "footprint_km2",
+    "Spread rate":      "mean_ros_kmh",
+    "Radiative energy": "fre_tj",
+    "Peak FRP":         "peak_frp_mw",
+    "Duration":         "duration_h",
+}
+
+# Arrival time is a magnitude, so one hue, light to dark: the ground reached
+# last is the darkest. The light end stays well clear of the basemap's white.
+ARRIVAL_SCALE = [[0.0, "#FDBE85"], [0.35, "#FD8D3C"], [0.7, "#D94701"],
+                 [1.0, "#7F2704"]]
+BURNING_NOW = "#D00000"
+
+
+@st.cache_data(show_spinner=False)
+def load_geo() -> Optional[dict]:
+    """The four spread tables, or None if prepare_spread.py has not run."""
+    if not (GEO_EVENT_FILE.exists() and GEO_SLOT_FILE.exists()
+            and GEO_CELL_FILE.exists()):
+        return None
+    out = {
+        "events": pd.read_parquet(GEO_EVENT_FILE),
+        "slots": pd.read_parquet(GEO_SLOT_FILE),
+        "cells": pd.read_parquet(GEO_CELL_FILE),
+        "detections": (pd.read_parquet(GEO_DET_FILE)
+                       if GEO_DET_FILE.exists() else None),
+    }
+    ev = out["events"]
+    ev["platform"] = ev["platform"].astype(str)
+    ev["start_local"] = ev["start_utc"] + LOCAL_OFFSET
+    return out
+
+
+def filter_geo_events(
+    ev: pd.DataFrame, platform: str, wilaya: str,
+    commune_code: Optional[int], yr_min: int, yr_max: int,
+) -> pd.DataFrame:
+    """Events whose origin falls inside the sidebar's selection."""
+    m = ((ev["platform"] == platform)
+         & (ev["year"] >= yr_min) & (ev["year"] <= yr_max))
+    if wilaya != ALL_WILAYAS:
+        m &= ev["ADM1_NAME"].astype(str) == wilaya
+    if commune_code is not None:
+        m &= ev["ADM2_CODE"] == commune_code
+    return ev[m]
+
+
+def spread_table(df: pd.DataFrame, rank_by: str, top_n: int) -> pd.DataFrame:
+    top = df.nlargest(top_n, SPREAD_RANKS[rank_by]).copy()
+    f64 = lambda c: top[c].astype("float64")     # noqa: E731 - float32 on disk
+    out = pd.DataFrame({
+        "Start (local)": top["start_local"].dt.strftime("%Y-%m-%d %H:%M"),
+        "Commune": top["ADM2_NAME"].astype(str),
+        "Wilaya": top["ADM1_NAME"].astype(str),
+        "Hours": f64("duration_h").round(1),
+        "Footprint (km²)": f64("footprint_km2").round(0),
+        "Spread (km/h)": f64("mean_ros_kmh").round(2),
+        "Heading": top["heading"].astype(str).replace({"nan": "", "None": ""}),
+        "Peak FRP (MW)": f64("peak_frp_mw").round(0),
+        "Energy (TJ)": f64("fre_tj").round(1),
+        "Before FIRMS (h)": f64("firms_lag_h").round(1),
+    })
+    out.attrs["rows"] = top.reset_index(drop=True)
+    return out.reset_index(drop=True)
+
+
+def _pixel_squares(cells: pd.DataFrame) -> dict:
+    """Each pixel as a square of its own area, so the map scales with zoom.
+
+    A marker is drawn in screen pixels and stays the same size at every zoom;
+    a polygon covers the ground the satellite pixel actually covered. Square
+    is an approximation: SEVIRI and FCI footprints are stretched north-south
+    this far from nadir, but the area is right.
+    """
+    half = (cells["pixel_km2"].astype("float64") ** 0.5) / 2
+    dlat = half / 110.574
+    dlon = half / (111.320 * cells["lat"].astype("float64").map(
+        lambda v: math.cos(math.radians(v))))
+    feats = []
+    for i, la, lo, a, b in zip(cells.index, cells["lat"], cells["lon"],
+                               dlat, dlon):
+        la, lo = float(la), float(lo)
+        ring = [[lo - b, la - a], [lo + b, la - a], [lo + b, la + a],
+                [lo - b, la + a], [lo - b, la - a]]
+        feats.append({"type": "Feature", "id": str(i), "properties": {},
+                      "geometry": {"type": "Polygon", "coordinates": [ring]}})
+    return {"type": "FeatureCollection", "features": feats}
+
+
+def _ring_marker(lat, lon, colour: str, size: float, name: str,
+                 hover: str) -> List[go.Scattermap]:
+    """A marker with a white ring, so it reads on top of the coloured pixels.
+
+    Scattermap has no marker outline, so the ring is a slightly larger white
+    marker underneath.
+    """
+    return [
+        go.Scattermap(lat=lat, lon=lon, mode="markers", hoverinfo="skip",
+                      marker=dict(size=size + 5, color="white"),
+                      showlegend=False, name=""),
+        go.Scattermap(lat=lat, lon=lon, mode="markers", name=name,
+                      marker=dict(size=size, color=colour),
+                      hovertemplate=hover + "<extra></extra>"),
+    ]
+
+
+def map_spread(
+    row: pd.Series, cells: pd.DataFrame, burning: pd.DataFrame,
+    at: pd.Timestamp, firms: Optional[pd.Series],
+) -> go.Figure:
+    """Pixels reached by `at`, coloured by when; the ones burning then in red."""
+    start = row["start_utc"]
+    span_h = max(float(row["duration_h"]), 0.25)
+    seen = cells[cells["first_time"] <= at]
+    hours = (seen["first_time"] - start).dt.total_seconds() / 3600
+    burned_h = ((seen["last_time"] - seen["first_time"]).dt.total_seconds()
+                / 3600 + row["slot_min"] / 60)
+    first_local = (seen["first_time"] + LOCAL_OFFSET).dt.strftime("%d %b %H:%M")
+
+    fig = go.Figure()
+    if not seen.empty:
+        fig.add_trace(go.Choroplethmap(
+            geojson=_pixel_squares(seen), locations=[str(i) for i in seen.index],
+            z=hours, zmin=0, zmax=span_h, colorscale=ARRIVAL_SCALE,
+            marker_opacity=0.85, marker_line_width=0.5,
+            marker_line_color="white",
+            customdata=list(zip(first_local, burned_h,
+                                seen["frp_max_mw"].astype("float64"))),
+            hovertemplate=("Reached %{customdata[0]} "
+                           "(+%{z:.1f} h)<br>burning for %{customdata[1]:.1f} h"
+                           "<br>peak %{customdata[2]:.0f} MW<extra></extra>"),
+            colorbar=dict(title="Hours after<br>first detection", len=0.6,
+                          thickness=12, x=0.98, xanchor="right", y=0.5,
+                          yanchor="middle", outlinewidth=0,
+                          bgcolor="rgba(255,255,255,0.75)"),
+            name="", showlegend=False,
+        ))
+    if burning is not None and not burning.empty:
+        for t in _ring_marker(burning["lat"], burning["lon"], BURNING_NOW, 7,
+                              "Burning in this slot", "%{text} MW"):
+            fig.add_trace(t)
+        fig.data[-1].text = burning["frp_mw"].round(0).astype(str)
+    for t in _ring_marker([row["lat"]], [row["lon"]], "#1B1B1F", 10,
+                          "Origin (first slot)",
+                          f"First seen {row['start_local']:%d %b %H:%M} local"):
+        fig.add_trace(t)
+    if firms is not None:
+        for t in _ring_marker([firms["lat"]], [firms["lon"]], HIGHLIGHT, 10,
+                              "FIRMS ignition",
+                              f"FIRMS ignition, {firms['date']:%d %b} "
+                              f"~{int(firms['hour_local']):02d}h local"):
+            fig.add_trace(t)
+
+    pad = 0.02
+    lat_all = list(cells["lat"]) + [row["lat"]]
+    lon_all = list(cells["lon"]) + [row["lon"]]
+    box = (min(lon_all) - pad, min(lat_all) - pad,
+           max(lon_all) + pad, max(lat_all) + pad)
+    span = max(box[2] - box[0], box[3] - box[1])
+    zoom = min(11.5, max(5.0, math.log2(360.0 / span) - 0.6))
+    fig.update_layout(
+        margin=dict(r=0, t=10, l=0, b=0),
+        legend=dict(orientation="h", y=0.01, x=0.01, yanchor="bottom",
+                    bgcolor="rgba(255,255,255,0.8)", font=dict(size=11)),
+        map=dict(style="carto-positron", zoom=zoom,
+                 center=dict(lat=(box[1] + box[3]) / 2,
+                             lon=(box[0] + box[2]) / 2)),
+        uirevision=f"spread-{row['event_id']}",
+    )
+    return fig
+
+
+def chart_spread_timeline(slots: pd.DataFrame, at: pd.Timestamp) -> go.Figure:
+    """Intensity, reach and area against time, one panel each.
+
+    Three panels rather than three axes on one: the units share nothing, and a
+    second y-axis invites reading a crossing as meaningful. Slots that were
+    never read are gaps, not zeros.
+    """
+    from plotly.subplots import make_subplots
+
+    s = slots.sort_values("time")
+    x = s["time"] + LOCAL_OFFSET
+    fig = make_subplots(
+        rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.07,
+        subplot_titles=("Fire radiative power (MW)",
+                        "Front: distance from origin (km)",
+                        "Pixels reached (km²)"),
+    )
+    fig.add_trace(go.Scatter(
+        x=x, y=s["frp_mw"], mode="lines", line=dict(color="#E25822", width=2),
+        fill="tozeroy", fillcolor="rgba(226,88,34,0.15)", connectgaps=False,
+        hovertemplate="%{y:,.0f} MW<extra></extra>", name="FRP",
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=x, y=s["front_km"], mode="lines", line=dict(color="#9D0208", width=2),
+        line_shape="hv", customdata=s["ros_kmh"],
+        hovertemplate=("%{y:.1f} km, advancing %{customdata:.1f} km/h"
+                       "<extra></extra>"),
+        name="Front",
+    ), row=2, col=1)
+    fig.add_trace(go.Scatter(
+        x=x, y=s["footprint_km2"], mode="lines",
+        line=dict(color="#6A040F", width=2), line_shape="hv",
+        hovertemplate="%{y:,.0f} km²<extra></extra>", name="Footprint",
+    ), row=3, col=1)
+    fig.add_vline(x=at + LOCAL_OFFSET, line_color="#495057", line_width=1,
+                  line_dash="dot", row="all", col=1)
+    fig.update_annotations(font_size=12, x=0, xanchor="left")
+    fig.update_layout(
+        template="plotly_white", showlegend=False, height=470,
+        margin=dict(l=0, r=10, t=30, b=0), hovermode="x unified",
+    )
+    fig.update_xaxes(title_text="Local time (UTC+1)", row=3, col=1)
+    return fig
+
+
+def chart_diurnal(dets: pd.DataFrame, suffix: str) -> go.Figure:
+    """Share of all radiated power by local hour.
+
+    Only a geostationary record can draw this: a polar orbiter sees the fire
+    belt at the same two or three hours every day, so its timestamps measure
+    the orbit, not the fire.
+    """
+    if dets is None or dets.empty:
+        return _empty_fig("No detections in this selection")
+    hour = (dets["time"] + LOCAL_OFFSET).dt.hour
+    share = (dets["frp_mw"].astype("float64").groupby(hour).sum()
+             .reindex(range(24), fill_value=0.0))
+    share = 100 * share / share.sum()
+    fig = go.Figure(go.Bar(
+        x=share.index, y=share.values, marker_color="#E25822",
+        hovertemplate="%{x}:00–%{x}:59 · %{y:.1f}% of all FRP<extra></extra>",
+    ))
+    fig.update_layout(
+        title=f"When Fires Burn Hardest{suffix}", template="plotly_white",
+        xaxis=dict(title="Local hour (UTC+1)", dtick=3),
+        yaxis_title="Share of radiated power (%)", bargap=0.15,
+        margin=dict(l=0, r=10, t=40, b=0),
+    )
+    return fig
+
+
+def chart_firms_lead(ev: pd.DataFrame, suffix: str) -> go.Figure:
+    """How many hours before FIRMS the geostationary record saw each fire."""
+    lag = ev["firms_lag_h"].dropna().astype("float64")
+    if lag.empty:
+        return _empty_fig("No event matched to a FIRMS ignition")
+    fig = go.Figure(go.Histogram(
+        x=lag.clip(-12, 24), xbins=dict(start=-12, end=24, size=1),
+        marker_color="#9D0208",
+        hovertemplate="%{x} h · %{y} fires<extra></extra>",
+    ))
+    fig.add_vline(x=0, line_color="#495057", line_dash="dash",
+                  annotation_text="same time", annotation_position="top")
+    fig.update_layout(
+        title=f"Meteosat's Head Start over FIRMS{suffix}",
+        template="plotly_white", bargap=0.1,
+        xaxis_title="Hours earlier than the first FIRMS detection",
+        yaxis_title="Fires", margin=dict(l=0, r=10, t=40, b=0),
+    )
+    return fig
+
+
+def render_spread_section(
+    wilaya: str, commune_code: Optional[int],
+    yr_min: int, yr_max: int, suffix: str,
+) -> None:
+    st.subheader("⏱️ Fire Spread")
+
+    geo = load_geo()
+    if geo is None:
+        st.info(
+            "**No geostationary data yet.** This section follows fires every "
+            "10 minutes (MTG-I) or 15 (MSG) from Meteosat, which watches "
+            "Algeria continuously.\n\n"
+            "1. Register (free) with the EUMETSAT "
+            "[LSA SAF](https://lsa-saf.eumetsat.int) and set `LSASAF_USER` "
+            "and `LSASAF_PASSWORD`.\n"
+            "2. `python fetch_geostationary.py --platform MTG --start "
+            "2025-07-01 --end 2025-07-31` (or `--platform MSG` for the years "
+            "before 2025).\n"
+            "3. `python prepare_spread.py`.",
+            icon="⏱️",
+        )
+        return
+
+    ev_all = geo["events"]
+    platforms = [p for p in PLATFORM_LABELS if p in set(ev_all["platform"])]
+    if len(platforms) > 1:
+        platform = st.radio(
+            "Satellite", platforms, horizontal=True, key="spread_platform",
+            format_func=PLATFORM_LABELS.get, label_visibility="collapsed",
+            help="Two separate records, never mixed: FCI's ~1 km pixels catch "
+                 "fires SEVIRI's ~3 km pixels miss, so pooling them would "
+                 "make counts jump wherever one satellite takes over.",
+        )
+    else:
+        platform = platforms[0]
+        st.caption(f"Source: **{PLATFORM_LABELS[platform]}** "
+                   "(EUMETSAT LSA SAF FRP-PIXEL)")
+
+    df = filter_geo_events(ev_all, platform, wilaya, commune_code,
+                           yr_min, yr_max)
+    if df.empty:
+        years = ev_all.loc[ev_all["platform"] == platform, "year"]
+        span = (f"{years.min()}" if years.min() == years.max()
+                else f"{years.min()}–{years.max()}")
+        st.warning(f"No geostationary fire in this selection. The "
+                   f"{platform} record covers {span}; widen the year range "
+                   f"or clear the wilaya filter.")
+        return
+
+    linked = df["firms_lag_h"].dropna()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("🔥 Fires tracked", f"{len(df):,}")
+    k2.metric("➡️ Median spread", f"{df['mean_ros_kmh'].median():.2f} km/h",
+              help="Farthest reach from the origin divided by the time it "
+                   "took to get there, per fire.")
+    k3.metric("💨 Fastest fire", f"{df['mean_ros_kmh'].max():.1f} km/h")
+    k4.metric("⏱️ Seen before FIRMS",
+              f"{(linked > 0).mean():.0%}" if len(linked) else "n/a",
+              f"median {linked.median():+.1f} h" if len(linked) else None,
+              delta_color="off",
+              help="Among fires matched to a FIRMS ignition (within 10 km and "
+                   "24 h), the share Meteosat saw first.")
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        rank_by = st.radio("Rank by", list(SPREAD_RANKS), horizontal=True,
+                           key="spread_rank", label_visibility="collapsed")
+    with c2:
+        top_n = st.selectbox("Show", [25, 50, 100, 250], index=1,
+                             key="spread_top_n", label_visibility="collapsed")
+
+    table = spread_table(df, rank_by, int(top_n))
+    rows = table.attrs["rows"]
+    event = st.dataframe(table, key="spread_table", hide_index=True,
+                         on_select="rerun", selection_mode="single-row",
+                         **STRETCH)
+    picked_i = 0
+    try:
+        chosen = event["selection"]["rows"]
+        if chosen:
+            picked_i = int(chosen[0])
+    except (TypeError, KeyError, IndexError, ValueError):
+        pass
+    row = rows.iloc[picked_i]
+    st.caption(
+        f"The {len(table)} largest of **{len(df):,}** fires{suffix} by "
+        f"**{rank_by.lower()}**. "
+        + ("Showing the top one; click a row to replay another."
+           if picked_i == 0 else "")
+    )
+
+    eid = int(row["event_id"])
+    slots = geo["slots"][geo["slots"]["event_id"] == eid]
+    cells = geo["cells"][geo["cells"]["event_id"] == eid].reset_index(drop=True)
+    dets = geo["detections"]
+    dets_e = dets[dets["event_id"] == eid] if dets is not None else None
+
+    times = list(slots.sort_values("time")["time"])
+    start = row["start_utc"]
+    at = st.select_slider(
+        "Replay", options=times, value=times[-1], key=f"spread_t_{eid}",
+        format_func=lambda t: (f"{t + LOCAL_OFFSET:%d %b %H:%M} local "
+                               f"(+{(t - start).total_seconds() / 3600:.1f} h)"),
+        help="Drag to replay the fire slot by slot. The map shows every pixel "
+             "reached so far, coloured by when, and the pixels burning in "
+             "that slot in red.",
+    )
+
+    firms = None
+    if pd.notna(row["firms_ignition_id"]):
+        ign = load_ignitions()
+        if ign is not None:
+            hit = ign[ign["ignition_id"] == int(row["firms_ignition_id"])]
+            firms = hit.iloc[0] if not hit.empty else None
+
+    m1, m2 = st.columns([1.3, 1])
+    with m1:
+        burning = dets_e[dets_e["time"] == at] if dets_e is not None else None
+        st.plotly_chart(map_spread(row, cells, burning, at, firms),
+                        key="spread_map", **STRETCH)
+        st.caption(
+            f"{row['ADM2_NAME']}, {row['ADM1_NAME']} · first seen "
+            f"{row['start_local']:%d %B %Y at %H:%M} local. Each square is "
+            f"one {platform} pixel at its true ground area "
+            f"(~{cells['pixel_km2'].median():.1f} km² here)."
+        )
+    with m2:
+        e1, e2 = st.columns(2)
+        e1.metric("➡️ Spread", f"{row['mean_ros_kmh']:.2f} km/h",
+                  f"peak {row['max_ros_kmh']:.1f} km/h", delta_color="off",
+                  help="Mean: farthest reach over the time taken. Peak: the "
+                       "fastest hour, which moves in whole-pixel steps.")
+        e2.metric("🧭 Heading", str(row["heading"])
+                  if pd.notna(row["heading"]) else "none",
+                  f"front {row['max_front_km']:.1f} km", delta_color="off")
+        e3, e4 = st.columns(2)
+        e3.metric("⚡ Peak FRP", f"{row['peak_frp_mw']:,.0f} MW",
+                  f"{row['peak_time_utc'] + LOCAL_OFFSET:%d %b %H:%M}",
+                  delta_color="off")
+        e4.metric("🔥 Energy", f"{row['fre_tj']:,.1f} TJ",
+                  f"~{row['biomass_t']:,.0f} t biomass", delta_color="off")
+        st.plotly_chart(chart_spread_timeline(slots, at),
+                        key="spread_timeline", **STRETCH)
+        if firms is not None:
+            lag = float(row["firms_lag_h"])
+            st.caption(
+                f"Also in the FIRMS record as ignition "
+                f"#{int(row['firms_ignition_id'])}, first detected "
+                + (f"**{lag:.1f} h after** Meteosat." if lag > 0 else
+                   f"{-lag:.1f} h before Meteosat.")
+            )
+        if pd.notna(row["n_slots_obs"]):
+            total = len(times)
+            st.caption(f"{int(row['n_slots_obs'])} of {total} slots in this "
+                       f"fire's lifetime were read; gaps in the curves are "
+                       f"slots with no data, not slots with no fire.")
+
+    st.markdown("---")
+    c3, c4 = st.columns(2)
+    with c3:
+        sel = (dets[dets["event_id"].isin(df["event_id"])]
+               if dets is not None else None)
+        st.plotly_chart(chart_diurnal(sel, suffix), key="spread_diurnal",
+                        **STRETCH)
+        st.caption("Every fire in the selection, every slot. FIRMS cannot "
+                   "draw this: its timestamps are the satellites' overpass "
+                   "times, not the fires'.")
+    with c4:
+        st.plotly_chart(chart_firms_lead(df, suffix), key="spread_lead",
+                        **STRETCH)
+        st.caption("Positive: Meteosat saw the fire first. FIRMS times are "
+                   "kept to the hour, so each lag is good to about ±30 min.")
+
+    st.caption(
+        "**Footprint is not burned area.** A pixel is flagged whether a hectare "
+        "or all of it burns, so it is the envelope the fire stayed inside; "
+        "the 🔥 Burned area section remains the measurement. **Spread** is the "
+        "advance of the farthest burning pixel from where the fire was first "
+        "seen, so it moves in whole-pixel steps (~1.2 km for MTG, ~3.6 km for "
+        "MSG). **Energy** integrates radiative power over the slots the fire "
+        "was seen in: smoke and cloud hide fires, and SEVIRI misses most below "
+        "about 40–50 MW, so it is a lower bound. Times are slot starts; the "
+        "scan reaches northern Algeria a few minutes in."
+    )
+
+
 # ── Main app ──────────────────────────────────────────────────────────────────
 def main() -> None:
     # Load all data (instant — Parquet cached on first run)
@@ -2036,10 +2520,11 @@ def main() -> None:
     # raises inside its own widget-state serialisation — which would leave the
     # whole ignition half untestable.
     BURN_VIEW, IGN_VIEW = "🔥 Burned area", "🎯 Ignitions"
-    EVENT_VIEW, WX_VIEW = "📇 Fire events", "🌡️ Fire weather"
-    SENSOR_VIEW = "🛰️ Sensor check"
+    EVENT_VIEW, SPREAD_VIEW = "📇 Fire events", "⏱️ Fire spread"
+    WX_VIEW, SENSOR_VIEW = "🌡️ Fire weather", "🛰️ Sensor check"
     view = st.radio(
-        "Section", [BURN_VIEW, IGN_VIEW, EVENT_VIEW, WX_VIEW, SENSOR_VIEW],
+        "Section",
+        [BURN_VIEW, IGN_VIEW, EVENT_VIEW, SPREAD_VIEW, WX_VIEW, SENSOR_VIEW],
         horizontal=True, key="main_view", label_visibility="collapsed",
     )
 
@@ -2175,6 +2660,10 @@ def main() -> None:
             yr_min, yr_max, title_suffix,
         )
 
+    elif view == SPREAD_VIEW:
+        render_spread_section(selected_wilaya, commune_code, yr_min, yr_max,
+                              title_suffix)
+
     elif view == WX_VIEW:
         render_weather_section(selected_wilaya, yr_min, yr_max, title_suffix)
 
@@ -2213,7 +2702,15 @@ def main() -> None:
   surface artefacts rather than wildfires.
 - Note that `acq_time` reflects fixed satellite overpasses (Terra ~10:30/22:30,
   Aqua and VIIRS ~13:30/01:30 local), so time of day carries **no** information
-  about how a fire started.
+  about how a fire started. The **Fire spread** section is the exception: it
+  is built from Meteosat, which images Algeria every 10 minutes (MTG-I, FCI)
+  or 15 (MSG, SEVIRI).
+- **Fire spread** - EUMETSAT LSA SAF FRP-PIXEL fire pixels (MSG LSA-502,
+  MTG LSA-509), clustered per satellite in space and time (3 km for MTG,
+  6 km for MSG, 6 h), with the same flare and vegetation screening as the
+  ignitions. Pixels are ~1.5 km² (MTG) and ~13 km² (MSG) over the fire belt,
+  so spread rates move in whole-pixel steps and footprints are envelopes,
+  not burned area.
             """
         )
 
