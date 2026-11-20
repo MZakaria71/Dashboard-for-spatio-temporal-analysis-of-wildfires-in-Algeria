@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Calculateur APQR</title>
+<style>
+:root{--bg:#f4f6f9;--card:#fff;--txt:#1d2733;--mut:#5d6b7a;--pri:#1f5fa8;--ok:#1e8a4c;--warn:#c27c0e;--bad:#c0392b;--bd:#d8dee6}
+@media (prefers-color-scheme:dark){:root{--bg:#12171d;--card:#1b222b;--txt:#e6ebf0;--mut:#9aa7b4;--pri:#5b9be0;--bd:#2d3742}}
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--txt)}
+header{background:var(--pri);color:#fff;padding:18px 16px}header h1{margin:0;font-size:1.4rem}header p{margin:4px 0 0;opacity:.85}
+main{max-width:1150px;margin:auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:16px}
+h2{font-size:1.1rem;margin:0 0 12px;color:var(--pri)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
+label{font-size:.85rem;color:var(--mut);display:block;margin-bottom:3px}
+input,select,textarea{width:100%;padding:7px 8px;border:1px solid var(--bd);border-radius:6px;background:var(--bg);color:var(--txt);font:inherit}
+textarea{min-height:110px;font-family:monospace}
+button{background:var(--pri);color:#fff;border:0;border-radius:6px;padding:9px 16px;font:inherit;cursor:pointer;margin:4px 6px 0 0}
+button.sec{background:transparent;color:var(--pri);border:1px solid var(--pri)}
+table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{border-bottom:1px solid var(--bd);padding:6px;text-align:left}
+.tw{overflow-x:auto}
+.kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.k{border:1px solid var(--bd);border-radius:8px;padding:10px}.k b{display:block;font-size:1.3rem}.k span{font-size:.8rem;color:var(--mut)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.badge{display:inline-block;padding:3px 10px;border-radius:12px;color:#fff;font-weight:600}
+canvas{width:100%;height:260px;border:1px solid var(--bd);border-radius:8px}
+.verdict{font-size:1.2rem;padding:14px;border-radius:8px;border:2px solid}
+@media print{button,.noprint{display:none}body{background:#fff}}
+</style>
+</head>
+<body>
+<header><h1>Calculateur APQR / PQR</h1><p>Revue Qualité Produit Annuelle : capabilité, tendances et évaluation globale (ICH Q10, EU GMP Ch.1.10, 21 CFR 211.180(e))</p></header>
+<main>
+
+<section class="card"><h2>1. Informations produit</h2>
+<div class="grid">
+<div><label>Produit</label><input id="prod" placeholder="Ex : Paracétamol 500 mg cp"></div>
+<div><label>Forme / Dosage</label><input id="forme"></div>
+<div><label>Période revue</label><input id="periode" placeholder="01/2026 au 12/2026"></div>
+<div><label>Rédacteur</label><input id="redac"></div>
+</div></section>
+
+<section class="card"><h2>2. Paramètres critiques (CQA / CPP)</h2>
+<p style="color:var(--mut);font-size:.9rem">Saisir les résultats par lot séparés par virgule, espace ou retour à la ligne. Laisser LSL ou USL vide pour une spécification unilatérale.</p>
+<div id="params"></div>
+<button class="sec" onclick="addParam()">+ Ajouter un paramètre</button>
+<button class="sec" onclick="demo()">Charger un exemple</button>
+</section>
+
+<section class="card"><h2>3. Données qualité de la période</h2>
+<div class="grid">
+<div><label>Lots fabriqués</label><input type="number" id="nLots" min="0"></div>
+<div><label>Lots libérés</label><input type="number" id="nRel" min="0"></div>
+<div><label>Lots rejetés</label><input type="number" id="nRej" min="0"></div>
+<div><label>Lots retraités / repris</label><input type="number" id="nRw" min="0"></div>
+<div><label>OOS confirmés</label><input type="number" id="oos" min="0"></div>
+<div><label>OOT</label><input type="number" id="oot" min="0"></div>
+<div><label>Déviations mineures</label><input type="number" id="devMin" min="0"></div>
+<div><label>Déviations majeures</label><input type="number" id="devMaj" min="0"></div>
+<div><label>Déviations critiques</label><input type="number" id="devCrit" min="0"></div>
+<div><label>CAPA ouvertes</label><input type="number" id="capaO" min="0"></div>
+<div><label>CAPA en retard</label><input type="number" id="capaL" min="0"></div>
+<div><label>CAPA clôturées efficaces</label><input type="number" id="capaC" min="0"></div>
+<div><label>Réclamations qualité</label><input type="number" id="recl" min="0"></div>
+<div><label>Unités distribuées (millions)</label><input type="number" id="units" min="0" step="0.01"></div>
+<div><label>Rappels de lots</label><input type="number" id="rappel" min="0"></div>
+<div><label>Retours produit</label><input type="number" id="retours" min="0"></div>
+<div><label>Change controls</label><input type="number" id="cc" min="0"></div>
+<div><label>Stabilité : résultats hors spec</label><input type="number" id="stab" min="0"></div>
+<div><label>Validation / qualif. à jour ?</label><select id="valid"><option value="1">Oui</option><option value="0">Non</option></select></div>
+<div><label>Fournisseurs qualifiés à jour ?</label><select id="fourn"><option value="1">Oui</option><option value="0">Non</option></select></div>
+</div>
+<button onclick="calc()">Calculer l'APQR</button>
+<button class="sec" onclick="window.print()">Imprimer / PDF</button>
+<button class="sec" onclick="exportCSV()">Exporter CSV</button>
+</section>
+
+<section class="card" id="res" style="display:none"><h2>4. Résultats</h2>
+<div class="kpi" id="kpi"></div>
+<h3>Capabilité des paramètres</h3>
+<div class="tw"><table id="capTab"></table></div>
+<p style="font-size:.85rem;color:var(--mut)">Cpk ≥ 1,33 : capable ; 1,00 à 1,33 : limite, surveillance ; &lt; 1,00 : non capable. Règles de tendance : Nelson 1 (point hors ±3σ), 2 (9 points du même côté), 3 (6 points montants/descendants).</p>
+<h3>Cartes de contrôle</h3>
+<div id="charts"></div>
+<h3>Évaluation globale</h3>
+<div class="tw"><table id="scoreTab"></table></div>
+<div id="verdict" class="verdict" style="margin-top:12px"></div>
+<h3>Recommandations</h3><ul id="reco"></ul>
+</section>
+</main>
+
+<script>
+let pid=0;
+function addParam(n='',u='',l='',h='',d=''){
+  const id=pid++,div=document.createElement('div');
+  div.className='card';div.id='p'+id;div.style.background='var(--bg)';
+  div.innerHTML=`<div class="grid">
+  <div><label>Paramètre</label><input class="pn" value="${n}" placeholder="Dosage (%)"></div>
+  <div><label>Unité</label><input class="pu" value="${u}"></div>
+  <div><label>LSL (limite basse)</label><input type="number" step="any" class="pl" value="${l}"></div>
+  <div><label>USL (limite haute)</label><input type="number" step="any" class="ph" value="${h}"></div></div>
+  <label style="margin-top:8px">Résultats par lot</label><textarea class="pd">${d}</textarea>
+  <button class="sec noprint" onclick="document.getElementById('p${id}').remove()">Supprimer</button>`;
+  document.getElementById('params').appendChild(div);
+}
+function demo(){
+  document.getElementById('params').innerHTML='';
+  const r=(m,s,n)=>Array.from({length:n},()=>{let u=0;for(let i=0;i<6;i++)u+=Math.random();return (m+(u-3)*s*1.41).toFixed(2)}).join(', ');
+  addParam('Dosage','%','95','105',r(100.2,1.0,30));
+  addParam('Dissolution 30 min','%','80','',r(91,3.2,30));
+  addParam('Dureté','N','60','120',r(88,8,30));
+  addParam('Uniformité de teneur (VA)','','','15',r(5.5,1.6,30));
+  const v={prod:'Paracétamol 500 mg',forme:'Comprimé',periode:'01/2026 au 12/2026',nLots:30,nRel:29,nRej:1,nRw:0,oos:1,oot:2,devMin:6,devMaj:1,devCrit:0,capaO:4,capaL:1,capaC:5,recl:3,units:12,rappel:0,retours:1,cc:4,stab:0};
+  for(const k in v)document.getElementById(k).value=v[k];
+}
+const num=id=>parseFloat(document.getElementById(id).value)||0;
+function stats(x){
+  const n=x.length,m=x.reduce((a,b)=>a+b,0)/n;
+  const s=n>1?Math.sqrt(x.reduce((a,b)=>a+(b-m)**2,0)/(n-1)):0;
+  let mr=0;for(let i=1;i<n;i++)mr+=Math.abs(x[i]-x[i-1]);
+  const sw=n>1?(mr/(n-1))/1.128:0;
+  return {n,m,s,sw,min:Math.min(...x),max:Math.max(...x)};
+}
+function cap(st,l,h){
+  const f=(sig)=>{
+    if(!sig)return {cp:null,cpk:null};
+    const cpu=h!=null?(h-st.m)/(3*sig):null,cpl=l!=null?(st.m-l)/(3*sig):null;
+    const cp=(l!=null&&h!=null)?(h-l)/(6*sig):null;
+    const cpk=Math.min(...[cpu,cpl].filter(v=>v!=null));
+    return {cp,cpk};
+  };
+  const a=f(st.sw),b=f(st.s);
+  return {cp:a.cp,cpk:a.cpk,pp:b.cp,ppk:b.cpk};
+}
+function nelson(x,m,sw){
+  const t=[];
+  if(x.some(v=>Math.abs(v-m)>3*sw))t.push('R1');
+  for(let i=0;i+9<=x.length;i++){const w=x.slice(i,i+9);if(w.every(v=>v>m)||w.every(v=>v<m)){t.push('R2');break}}
+  for(let i=0;i+6<=x.length;i++){const w=x.slice(i,i+6);let up=1,dn=1;for(let j=1;j<6;j++){if(w[j]<=w[j-1])up=0;if(w[j]>=w[j-1])dn=0}if(up||dn){t.push('R3');break}}
+  return t;
+}
+const f2=v=>v==null||!isFinite(v)?'-':v.toFixed(2);
+const cls=v=>v==null?'':v>=1.33?'ok':v>=1?'warn':'bad';
+let lastRows=[];
+function calc(){
+  const ps=[...document.querySelectorAll('#params>.card')];
+  const capTab=document.getElementById('capTab'),charts=document.getElementById('charts');
+  charts.innerHTML='';lastRows=[];
+  let rows='<tr><th>Paramètre</th><th>n</th><th>Moyenne</th><th>ET</th><th>Min / Max</th><th>Spéc.</th><th>Cp</th><th>Cpk</th><th>Ppk</th><th>Hors spéc.</th><th>Tendance</th></tr>';
+  let cpks=[],trends=0;
+  ps.forEach(p=>{
+    const name=p.querySelector('.pn').value||'Paramètre',u=p.querySelector('.pu').value;
+    const lv=p.querySelector('.pl').value,hv=p.querySelector('.ph').value;
+    const l=lv===''?null:+lv,h=hv===''?null:+hv;
+    const x=p.querySelector('.pd').value.split(/[\s,;]+/).map(s=>parseFloat(s.replace(',','.'))).filter(isFinite);
+    if(x.length<2)return;
+    const st=stats(x),c=cap(st,l,h),tr=nelson(x,st.m,st.sw);
+    const oosN=x.filter(v=>(l!=null&&v<l)||(h!=null&&v>h)).length;
+    if(c.cpk!=null)cpks.push(c.cpk);if(tr.length)trends++;
+    const spec=(l!=null?l:'-')+' ; '+(h!=null?h:'-')+' '+u;
+    rows+=`<tr><td>${name}</td><td>${st.n}</td><td>${f2(st.m)}</td><td>${f2(st.s)}</td><td>${f2(st.min)} / ${f2(st.max)}</td><td>${spec}</td><td>${f2(c.cp)}</td><td class="${cls(c.cpk)}"><b>${f2(c.cpk)}</b></td><td class="${cls(c.ppk)}">${f2(c.ppk)}</td><td class="${oosN?'bad':'ok'}">${oosN}</td><td class="${tr.length?'warn':'ok'}">${tr.length?tr.join(', '):'Aucune'}</td></tr>`;
+    lastRows.push([name,st.n,f2(st.m),f2(st.s),l??'',h??'',f2(c.cp),f2(c.cpk),f2(c.ppk),oosN,tr.join(' ')]);
+    const cv=document.createElement('canvas');charts.appendChild(cv);
+    const t=document.createElement('p');t.style.cssText='font-size:.85rem;margin:2px 0 14px';t.textContent=name+' (I-chart, LCI/LCS = moyenne ± 3σ intra)';charts.appendChild(t);
+    draw(cv,x,st,l,h);
+  });
+  capTab.innerHTML=rows;
+
+  // Scoring
+  const nL=num('nLots')||1,units=num('units')||0;
+  const rejRate=num('nRej')/nL*100,rwRate=num('nRw')/nL*100,devRate=(num('devMin')+num('devMaj')*3+num('devCrit')*10)/nL;
+  const capaTot=num('capaO')+num('capaC'),capaEff=capaTot?num('capaC')/capaTot*100:100;
+  const reclRate=units?num('recl')/units:num('recl');
+  const minCpk=cpks.length?Math.min(...cpks):null;
+  const crit=[
+    ['Capabilité procédé (Cpk min)',minCpk==null?'n/d':f2(minCpk),minCpk==null?2:minCpk>=1.33?3:minCpk>=1?2:minCpk>=0.67?1:0,20],
+    ['Tendances détectées',trends+' paramètre(s)',trends==0?3:trends==1?2:1,10],
+    ['Taux de rejet / retraitement',f2(rejRate+rwRate)+' %',rejRate+rwRate==0?3:rejRate+rwRate<=2?2:rejRate+rwRate<=5?1:0,15],
+    ['OOS / OOT',num('oos')+' / '+num('oot'),num('oos')==0&&num('oot')<=1?3:num('oos')<=1?2:num('oos')<=3?1:0,15],
+    ['Déviations (indice pondéré/lot)',f2(devRate),num('devCrit')>0?0:devRate<=0.2?3:devRate<=0.5?2:devRate<=1?1:0,15],
+    ['CAPA (efficacité, retards)',f2(capaEff)+' % ; '+num('capaL')+' en retard',num('capaL')==0&&capaEff>=80?3:num('capaL')<=1&&capaEff>=60?2:capaEff>=40?1:0,10],
+    ['Réclamations (par M unités)',f2(reclRate),num('rappel')>0?0:reclRate<=0.5?3:reclRate<=2?2:reclRate<=5?1:0,10],
+    ['Stabilité',num('stab')+' résultat(s) HS',num('stab')==0?3:num('stab')==1?1:0,3],
+    ['Validation / Fournisseurs',(num('valid')?'OK':'NOK')+' / '+(num('fourn')?'OK':'NOK'),num('valid')+num('fourn')==2?3:num('valid')+num('fourn')==1?1:0,2],
+  ];
+  let tot=0,st='<tr><th>Critère</th><th>Valeur</th><th>Note /3</th><th>Poids</th><th>Score</th></tr>';
+  crit.forEach(c=>{const s=c[2]/3*c[3];tot+=s;st+=`<tr><td>${c[0]}</td><td>${c[1]}</td><td class="${['bad','bad','warn','ok'][c[2]]}">${c[2]}</td><td>${c[3]} %</td><td>${s.toFixed(1)}</td></tr>`});
+  st+=`<tr><th colspan="4">Score global</th><th>${tot.toFixed(1)} / 100</th></tr>`;
+  document.getElementById('scoreTab').innerHTML=st;
+  const blocking=num('devCrit')>0||num('rappel')>0||(minCpk!=null&&minCpk<1);
+  let v,c;
+  if(tot>=85&&!blocking){v='Produit en état de maîtrise : procédé validé et capable, aucune action majeure requise.';c='ok'}
+  else if(tot>=65&&!(num('devCrit')>0||num('rappel')>0)){v='Maîtrise acceptable avec points de vigilance : actions d\'amélioration et suivi renforcé requis.';c='warn'}
+  else{v='Produit hors maîtrise : investigation, CAPA et éventuelle revalidation requises.';c='bad'}
+  const vd=document.getElementById('verdict');vd.className='verdict '+c;vd.style.borderColor='currentColor';
+  vd.innerHTML=`<b>${tot.toFixed(1)} / 100</b> : ${v}`;
+  const R=[];
+  if(minCpk!=null&&minCpk<1.33)R.push('Cpk < 1,33 : analyser les sources de variabilité (matières premières, équipements, paramètres) et envisager une optimisation du procédé.');
+  if(trends)R.push('Tendance(s) détectée(s) : ouvrir une investigation OOT et renforcer la surveillance statistique.');
+  if(num('oos'))R.push('OOS confirmés : vérifier la clôture des investigations et l\'efficacité des CAPA associées.');
+  if(num('devCrit')||num('devMaj'))R.push('Déviations majeures/critiques : revue de la cause racine et évaluation de l\'impact sur les lots libérés.');
+  if(num('capaL'))R.push('CAPA en retard : réévaluer les échéances et escalader en revue de direction.');
+  if(num('rappel'))R.push('Rappel de lot : évaluation de l\'impact patient et notification aux autorités.');
+  if(!num('valid'))R.push('Mettre à jour le statut de validation / qualification.');
+  if(!num('fourn'))R.push('Compléter la qualification des fournisseurs.');
+  if(!R.length)R.push('Maintenir la surveillance actuelle ; aucune action corrective nécessaire.');
+  document.getElementById('reco').innerHTML=R.map(r=>'<li>'+r+'</li>').join('');
+  document.getElementById('kpi').innerHTML=[
+    ['Score global',tot.toFixed(1)+' /100',c],['Cpk minimal',minCpk==null?'-':f2(minCpk),cls(minCpk)],
+    ['Taux de rejet',f2(rejRate)+' %',rejRate?'warn':'ok'],['Lots libérés',num('nRel')+' / '+num('nLots'),''],
+    ['Déviations',num('devMin')+num('devMaj')+num('devCrit'),num('devCrit')?'bad':''],['Réclamations',num('recl'),'']
+  ].map(k=>`<div class="k"><span>${k[0]}</span><b class="${k[2]}">${k[1]}</b></div>`).join('');
+  document.getElementById('res').style.display='block';
+  document.getElementById('res').scrollIntoView({behavior:'smooth'});
+}
+function draw(cv,x,st,l,h){
+  const dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=260;cv.width=W*dpr;cv.height=H*dpr;
+  const g=cv.getContext('2d');g.scale(dpr,dpr);
+  const css=getComputedStyle(document.documentElement),col=n=>css.getPropertyValue(n).trim();
+  const ucl=st.m+3*st.sw,lcl=st.m-3*st.sw;
+  const vals=[...x,ucl,lcl,...(l!=null?[l]:[]),...(h!=null?[h]:[])];
+  let lo=Math.min(...vals),hi=Math.max(...vals),pad=(hi-lo)*0.08||1;lo-=pad;hi+=pad;
+  const L=50,R=80,T=10,B=25,X=i=>L+i*(W-L-R)/Math.max(x.length-1,1),Y=v=>T+(hi-v)/(hi-lo)*(H-T-B);
+  g.font='11px system-ui';g.fillStyle=col('--mut');
+  for(let i=0;i<=4;i++){const v=lo+(hi-lo)*i/4;g.fillText(v.toFixed(1),4,Y(v)+4)}
+  const line=(v,c,lab,dash)=>{g.strokeStyle=c;g.setLineDash(dash);g.beginPath();g.moveTo(L,Y(v));g.lineTo(W-R,Y(v));g.stroke();g.setLineDash([]);g.fillStyle=c;g.fillText(lab,W-R+4,Y(v)+4)};
+  line(st.m,col('--ok'),'Moy',[]);line(ucl,col('--warn'),'LCS',[5,4]);line(lcl,col('--warn'),'LCI',[5,4]);
+  if(h!=null)line(h,col('--bad'),'USL',[]);if(l!=null)line(l,col('--bad'),'LSL',[]);
+  g.strokeStyle=col('--pri');g.lineWidth=1.5;g.beginPath();x.forEach((v,i)=>i?g.lineTo(X(i),Y(v)):g.moveTo(X(i),Y(v)));g.stroke();
+  x.forEach((v,i)=>{const out=(l!=null&&v<l)||(h!=null&&v>h)||v>ucl||v<lcl;g.fillStyle=out?col('--bad'):col('--pri');g.beginPath();g.arc(X(i),Y(v),out?4.5:3,0,7);g.fill()});
+  g.fillStyle=col('--mut');g.fillText('Lot 1',L,H-6);g.fillText('Lot '+x.length,W-R-30,H-6);
+}
+function exportCSV(){
+  if(!lastRows.length){alert('Lancez d\'abord le calcul.');return}
+  const h=['Paramètre','n','Moyenne','ET','LSL','USL','Cp','Cpk','Ppk','Hors spec','Tendance'];
+  const csv=[h,...lastRows].map(r=>r.join(';')).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv'}));
+  a.download='APQR_'+(document.getElementById('prod').value||'produit')+'.csv';a.click();
+}
+addParam();
+</script>
+</body>
+</html>
